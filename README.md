@@ -8,6 +8,7 @@
 [![Релиз](https://img.shields.io/github/v/release/Ms0Skrin/HumanType?style=for-the-badge&label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7&labelColor=0F172A&color=38BDF8)](https://github.com/Ms0Skrin/HumanType/releases/latest)
 ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-38BDF8?style=for-the-badge&logo=windows&logoColor=white&labelColor=0F172A)
 ![Linux](https://img.shields.io/badge/Linux-GNOME%2046%E2%80%9351-38BDF8?style=for-the-badge&logo=linux&logoColor=white&labelColor=0F172A)
+[![MIT](https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-MIT-38BDF8?style=for-the-badge&labelColor=0F172A)](LICENSE)
 
 **Пишешь — и не думаешь о раскладке.**<br>
 Набрал `ghbdtn` и пробел — получилось `привет`, а раскладка сама стала русской. Пишешь дальше.
@@ -113,6 +114,10 @@ python tests/sim_autoswitch.py   # логика Windows-версии с загл
 Запустите `build.bat` — получится `installer\HumanType-Setup-<версия>.exe`.
 
 </details>
+
+## 📄 Лицензия
+
+[MIT](LICENSE) — можно использовать, менять и распространять, сохраняя упоминание автора.
 
 <div align="center">
 <br>
