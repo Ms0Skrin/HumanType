@@ -1,11 +1,14 @@
 """Automatic layout switching: a system keyboard hook that follows the words being typed.
 
-The hook runs on a thread of its own and only records keys. When a word ends with a space it
-asks the `Session` whether the word (and maybe the short ones before it) belongs to the other
-layout. If so the space is held back, a worker erases the word, types it right, switches the
-window's layout and lets the space through; keys typed meanwhile are held and replayed after.
+The hook runs on a thread of its own and only records keys: the whole line typed since the caret
+last jumped, each key with the layout it was pressed in. When a word ends with a space it asks
+the `Session` whether the word (and maybe the short ones before it) belongs to the other layout.
+If so the space is held back, a worker erases the word, types it right, switches the window's
+layout and lets the space through; keys typed meanwhile are held and replayed after.
 A Backspace right after a fix undoes it and remembers the word as an exception.
 Enter and Tab end a word too: it is fixed before the key goes through, but cannot be undone.
+In a terminal, y/yes/n/no typed in the Russian layout (н, нуы, т, тщ) are fixed on Enter.
+The fix-layout hotkey flips the line it follows by typing it again, without the clipboard.
 """
 
 import ctypes
@@ -15,7 +18,7 @@ import threading
 import time
 import uuid
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pythoncom
@@ -25,9 +28,9 @@ import win32gui
 import win32process
 from PySide6.QtCore import QObject, Signal
 
-from .config import DEFAULT_EXCLUDED
+from .config import DEFAULT_EXCLUDED, TERMINALS
 from .detector import SENSITIVITY, Detector, Fix, Session
-from .layout import LANG_EN, LANG_RU
+from .layout import EN_TO_RU, LANG_EN, LANG_RU
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +39,7 @@ kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 WH_KEYBOARD_LL = 13
 WH_MOUSE_LL = 14
-WM_KEYDOWN, WM_SYSKEYDOWN = 0x0100, 0x0104
+WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0100, 0x0101, 0x0104, 0x0105
 WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN = 0x0201, 0x0204, 0x0207
 WM_QUIT = 0x0012
 WM_REHOOK = 0x8001  # WM_APP + 1: the watchdog asks the hook thread to set the hooks again
@@ -147,6 +150,37 @@ VK_BACK, VK_TAB, VK_RETURN, VK_SPACE = 0x08, 0x09, 0x0D, 0x20
 DELIMITERS = {VK_SPACE, VK_RETURN, VK_TAB}  # keys that end a word and get it judged
 LANGS = {LANG_EN: "en", LANG_RU: "ru"}
 LANG_IDS = {"en": LANG_EN, "ru": LANG_RU}
+MOD_KEYS = ((0x12, 0x0001), (0x11, 0x0002), (0x10, 0x0004), (0x5B, 0x0008), (0x5C, 0x0008))  # vk, MOD_* of RegisterHotKey
+MAX_LINE = 300
+# A terminal asking [y/N]: these answers typed in the Russian layout (н, нуы, т, тщ) are fixed on Enter.
+ANSWERS = {"y", "yes", "n", "no"}
+
+
+@dataclass(frozen=True)
+class Press:
+    vk: int
+    shift: bool
+    caps: bool
+    layout: str  # "en" | "ru": the layout the key was pressed in
+
+
+def other(lang: str) -> str:
+    return "ru" if lang == "en" else "en"
+
+
+def char_of(p: Press, layout: str) -> str:
+    """How the US layout spells this key in `layout`: Caps Lock reaches ж б ю ё х ъ э only in ЙЦУКЕН."""
+    if p.vk == VK_SPACE:
+        return " "
+    pair = US_KEYS[p.vk]
+    is_letter = 0x41 <= p.vk <= 0x5A or (layout == "ru" and p.vk in RU_LETTER_KEYS)
+    return pair[1] if p.shift != (p.caps and is_letter) else pair[0]
+
+
+def render(presses: list[Press], layout: str) -> str:
+    """The text these keys give in `layout`."""
+    text = "".join(char_of(p, layout) for p in presses)
+    return text.translate(EN_TO_RU) if layout == "ru" else text
 
 
 
@@ -286,15 +320,39 @@ def _idle_ms(since: int) -> int:
     return diff if diff < 0x80000000 else 0
 
 
+def _caps() -> bool:
+    return bool(user32.GetKeyState(0x14) & 1)
+
+
+def _mods() -> int:
+    """The modifiers held now, as RegisterHotKey spells them."""
+    mods = 0
+    for vk, flag in MOD_KEYS:
+        if _pressed(vk):
+            mods |= flag
+    return mods
+
+
+def _let_go_modifiers(timeout: float = 0.8) -> None:
+    """Waits for the hotkey's Ctrl/Shift/Alt/Win to be let go, then lifts any still down,
+    so the keys we send are not mixed with the hotkey's own."""
+    end = time.monotonic() + timeout
+    while any(_pressed(vk) for vk, _ in MOD_KEYS) and time.monotonic() < end:
+        time.sleep(0.01)
+    _send([_key(vk, up=True) for vk, _ in MOD_KEYS if _pressed(vk)])
+
+
 @dataclass
 class _Done:
     fix: Fix
     old_layout: str
+    run: list[Press]  # the keys as they were first typed
 
 
 class AutoSwitcher(QObject):
     corrected = Signal(str, str)  # before, after
     undone = Signal(str)  # the word now kept as typed
+    flipped = Signal(str, str)  # the text now typed, its layout
 
     def __init__(self, detector: Detector, exceptions_file: Path) -> None:
         super().__init__()
@@ -303,12 +361,19 @@ class AutoSwitcher(QObject):
         self.exceptions_file = exceptions_file
         self.enabled = True
         self.skip_fullscreen = True
+        self.terminal_answers = True  # y/yes/n/no typed in Russian in a terminal
         self.excluded: set[str] = {name.lower() for name in DEFAULT_EXCLUDED}
+        self.flip_hotkeys: set[tuple[int, int]] = set()  # (MOD_*, vk) of the hotkeys that flip the line
         self._own_pid = win32api.GetCurrentProcessId()
         self._lock = threading.RLock()
-        self._buffer: list[str] = []  # US-layout spelling of the word being typed
+        self._line: list[Press] = []  # what was typed since the caret last jumped, spaces included
+        # What came before line[0]: "edge" a word boundary for sure (Enter, a new window);
+        # "click" most likely one; "unknown" maybe the middle of a word (arrows, a repeat, a shortcut).
+        self._origin = "edge"
+        self._down: set[int] = set()  # keys held, to tell the system's autorepeat from a new press
         self._hwnd = 0
-        self._window_ok = True
+        self._window = "ok"  # "ok"; "answers": only terminal answers are fixed; "off": not followed
+        self._terminal = False
         self._last: _Done | None = None
         self._busy = False
         self._held: list[tuple[int, bool]] = []  # keys typed while a fix was being made
@@ -323,14 +388,21 @@ class AutoSwitcher(QObject):
 
     # --- settings ---
 
-    def configure(self, enabled: bool, sensitivity: str, short_words: bool, skip_fullscreen: bool, excluded: list[str]) -> None:
+    def configure(self, enabled: bool, sensitivity: str, short_words: bool, skip_fullscreen: bool, excluded: list[str],
+                  terminal_answers: bool = True) -> None:
         with self._lock:
             self.enabled = enabled
             self.detector.sensitivity = SENSITIVITY.get(sensitivity, SENSITIVITY["normal"])
             self.detector.short_words = short_words
             self.skip_fullscreen = skip_fullscreen
             self.excluded = {name.strip().lower() for name in excluded if name.strip()}
+            self.terminal_answers = terminal_answers
+            self._hwnd = 0  # judge the window again by the new settings
             self._reset()
+
+    def set_flip_hotkeys(self, hotkeys: list[tuple[int, int]]) -> None:
+        with self._lock:
+            self.flip_hotkeys = set(hotkeys)
 
     def load_exceptions(self) -> None:
         try:
@@ -370,10 +442,12 @@ class AutoSwitcher(QObject):
         with self._lock:
             self._reset()
 
-    def _reset(self) -> None:
-        self._buffer.clear()
+    def _reset(self, origin: str = "unknown") -> None:
+        """The caret moved or the text changed behind our back: forget what was typed."""
+        self._line.clear()
         self.session.reset()
         self._last = None
+        self._origin = origin
 
     def _set_hooks(self) -> None:
         for hook in self._hooks:
@@ -397,6 +471,7 @@ class AutoSwitcher(QObject):
                 self._set_hooks()
                 with self._lock:
                     self._reset()
+                    self._down.clear()
                 continue
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
@@ -423,7 +498,7 @@ class AutoSwitcher(QObject):
         self._seen = kernel32.GetTickCount()
         if code >= 0 and wparam in (WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN):
             with self._lock:
-                self._reset()  # a click may move the caret anywhere
+                self._reset("click")  # a click may move the caret anywhere
         return user32.CallNextHookEx(None, code, wparam, lparam)
 
     def _on_key(self, code: int, wparam: int, lparam: int) -> int:
@@ -437,102 +512,202 @@ class AutoSwitcher(QObject):
 
     def _handle(self, wparam: int, kb: KBDLLHOOKSTRUCT) -> bool:
         """Returns True to swallow the key."""
-        if kb.dwExtraInfo == MARKER or wparam not in (WM_KEYDOWN, WM_SYSKEYDOWN):
+        if kb.dwExtraInfo == MARKER:
             return False
         vk = kb.vkCode
+        if wparam in (WM_KEYUP, WM_SYSKEYUP):
+            self._down.discard(vk)
+            return False
+        if wparam not in (WM_KEYDOWN, WM_SYSKEYDOWN):
+            return False
+        # A key still down that is pressed again is the system's autorepeat. The hook runs before
+        # the key state changes, so a key whose release went missing reads as up here and is dropped.
+        self._down = {k for k in self._down if _pressed(k)}
+        repeat = vk in self._down
+        self._down.add(vk)
         if vk in MODIFIERS:
             return False
         with self._lock:
             if self._busy:  # a fix is being typed: hold this key and replay it after
                 self._held.append((vk, _pressed(0x10)))
                 return True
-            if not self.enabled:
-                return False
             hwnd = user32.GetForegroundWindow() or 0
             if hwnd != self._hwnd:
                 self._hwnd = hwnd
+                self._reset("edge")
+                self._window = self._window_kind(hwnd)
+            if self._window == "off":
                 self._reset()
-                self._window_ok = self._window_allowed(hwnd)
-            if not self._window_ok or _pressed(0x11) or _pressed(0x12) or _pressed(0x5B) or _pressed(0x5C):
-                self._reset()  # shortcuts, excluded apps
                 return False
-
+            if (_mods(), vk) in self.flip_hotkeys:
+                return False  # the hotkey flips the line we follow: keep it
+            if repeat:
+                self._reset()  # the system repeats the key by itself: we cannot count the characters
+                return False
+            if _pressed(0x11) or _pressed(0x12) or _pressed(0x5B) or _pressed(0x5C):
+                self._reset()  # a shortcut: copy, paste, undo... the text may be anything now
+                return False
             if vk == VK_BACK:
-                if self._last is not None and not self._buffer:
-                    done, self._last = self._last, None
-                    self._busy = True
-                    self._jobs.put(("undo", done, hwnd))
-                    return True
-                if self._buffer:
-                    self._buffer.pop()
-                else:
-                    self.session.reset()  # editing the previous word: the run is broken
-                return False
-
+                return self._backspace(hwnd)
             layout = self._layout(hwnd)
             if layout is None:
                 self._reset()
                 return False
-
             if vk in DELIMITERS:
-                keys = "".join(self._buffer)
-                self._buffer.clear()
-                self._last = None
-                if not keys:
-                    # A second space or an empty line: nothing to judge, and the words before no
-                    # longer sit one space apart, so they cannot be fixed together with the next.
-                    self.session.reset()
-                    return False
-                if focused_is_password(hwnd):
-                    self.session.reset()
-                    return False
-                fix = self.session.word(keys, layout)
-                if vk != VK_SPACE:
-                    self.session.reset()  # a new line or another field: the next words start afresh
-                if fix is None:
-                    return False
-                self._busy = True
-                self._jobs.put(("fix", fix, hwnd, layout, vk))
-                return True
-
-            char = self._char(vk, layout)
-            if char is None:
-                self._reset()  # arrows, Enter, Tab, F-keys, numpad...: the caret or the text moved on
+                return self._delimiter(vk, hwnd, layout)
+            if vk not in US_KEYS:
+                self._reset()  # arrows, Home, Delete, F-keys, numpad...: the caret or the text moved on
                 return False
-            if len(self._buffer) < 48:
-                self._buffer.append(char)
             self._last = None
+            self._append(Press(vk, _pressed(0x10), _caps(), layout))
             return False
+
+    # --- the line ---
+
+    def _append(self, press: Press) -> None:
+        self._line.append(press)
+        if len(self._line) > MAX_LINE:
+            del self._line[0]
+
+    def _word_start(self) -> int:
+        for i in range(len(self._line) - 1, -1, -1):
+            if self._line[i].vk == VK_SPACE:
+                return i + 1
+        return 0
+
+    def _run_start(self, words: int) -> int:
+        """Where the last `words` words of the line begin; spaces after the last word belong to the run."""
+        i = len(self._line)
+        while i and self._line[i - 1].vk == VK_SPACE:
+            i -= 1
+        for n in range(words):
+            while i and self._line[i - 1].vk != VK_SPACE:
+                i -= 1
+            if n < words - 1:
+                if i == 0:
+                    break
+                i -= 1  # the space between two words
+        return i
+
+    def _finish(self, vk: int) -> None:
+        self._last = None
+        if vk == VK_SPACE:
+            self._append(Press(VK_SPACE, False, False, "en"))
+        else:
+            self._reset("edge")  # Enter or Tab: a new line, a sent message or another field
+
+    def _backspace(self, hwnd: int) -> bool:
+        done, self._last = self._last, None
+        if done is not None and self._line and self._line[-1].vk == VK_SPACE:
+            self._busy = True
+            self._jobs.put(("undo", done, hwnd))
+            return True
+        if self._line:
+            if self._line.pop().vk == VK_SPACE:
+                self.session.reset()  # editing the word before: the run is broken
+        else:
+            self._reset()  # erasing what came before the line: maybe into the middle of a word
+        return False
+
+    def _delimiter(self, vk: int, hwnd: int, layout: str) -> bool:
+        if self._answer(vk, hwnd, layout):
+            return True
+        word = self._line[self._word_start():]
+        if not word or not self.enabled or self._window != "ok" or {p.layout for p in word} != {layout}:
+            # A second space or an empty line: nothing to judge, and the words before no longer sit
+            # one space apart, so they cannot be fixed together with the next. Or a word typed in
+            # two layouts: the person switched by hand in the middle of it.
+            self.session.reset()
+            self._finish(vk)
+            return False
+        if focused_is_password(hwnd):
+            self.session.reset()
+            self._finish(vk)
+            return False
+        fix = self.session.word("".join(char_of(p, layout) for p in word), layout)
+        if vk != VK_SPACE:
+            self.session.reset()  # a new line or another field: the next words start afresh
+        if fix is None:
+            self._finish(vk)
+            return False
+        start = self._run_start(len(fix.keys))
+        run = self._line[start:]
+        if len(run) != fix.erase or render(run, layout) != fix.original:
+            log.warning("run does not match the fix (%r vs %r), skipped", render(run, layout), fix.original)
+            self.session.reset()
+            self._finish(vk)
+            return False
+        if start == 0 and self._origin == "unknown":
+            log.info("not fixing %r: the word began before we started following it", fix.original)
+            self.session.reset()
+            self._finish(vk)
+            return False
+        self._line[start:] = [replace(p, layout=fix.layout) for p in run]
+        self._finish(vk)
+        self._busy = True
+        self._jobs.put(("fix", fix, hwnd, layout, vk, run))
+        return True
+
+    def _answer(self, vk: int, hwnd: int, layout: str) -> bool:
+        """A terminal asks [y/N] and the answer went in the Russian layout: нуы → yes, н → y, тщ → no."""
+        run = self._line
+        if (vk == VK_SPACE or not self.enabled or not self.terminal_answers or not self._terminal
+                or self._origin != "edge" or layout != "ru" or not run or len(run) > 3
+                or any(p.layout != "ru" or p.vk == VK_SPACE for p in run)
+                or render(run, "en").lower() not in ANSWERS):
+            return False
+        job = ("answer", len(run), render(run, "ru"), render(run, "en"), hwnd, vk)
+        self._reset("edge")
+        self._busy = True
+        self._jobs.put(job)
+        return True
+
+    # --- by hand ---
+
+    def flip(self, whole_line: bool, switch_layout: bool = True) -> bool:
+        """The fix-layout hotkey: types the word just typed (or the whole line followed) again in
+        the other layout. False when the line is not known; the clipboard fixer takes over then."""
+        with self._lock:
+            hwnd = user32.GetForegroundWindow() or 0
+            if self._busy or hwnd != self._hwnd or self._window == "off" or not self._line:
+                return False
+            start = 0 if whole_line else self._run_start(1)
+            if start == 0 and self._origin == "unknown":
+                return False  # the text goes on before what we saw: let the clipboard take it whole
+            run = self._line[start:]
+            letters = [p for p in run if p.vk != VK_SPACE]
+            if not letters or any(p.layout != letters[-1].layout for p in letters):
+                return False
+            target = other(letters[-1].layout)
+            self._line[start:] = [replace(p, layout=target) for p in run]
+            self.session.reset()
+            self._last = None
+            self._busy = True
+            self._jobs.put(("flip", len(run), render(run, target), target, switch_layout, hwnd))
+            return True
 
     # --- helpers for the hook ---
 
-    def _window_allowed(self, hwnd: int) -> bool:
+    def _window_kind(self, hwnd: int) -> str:
         try:
             _, pid = win32process.GetWindowThreadProcessId(hwnd)
         except Exception:
-            return False
+            self._terminal = False
+            return "off"
         if pid == self._own_pid:
-            return False
-        if process_name(hwnd).lower() in self.excluded:
-            return False
-        return not (self.skip_fullscreen and is_fullscreen(hwnd))
+            self._terminal = False
+            return "off"
+        name = process_name(hwnd).lower()
+        self._terminal = name in TERMINALS
+        if name in self.excluded:
+            return "answers" if self._terminal and self.terminal_answers else "off"
+        return "off" if self.skip_fullscreen and is_fullscreen(hwnd) else "ok"
 
     @staticmethod
     def _layout(hwnd: int) -> str | None:
         thread = user32.GetWindowThreadProcessId(hwnd, None)
         hkl = user32.GetKeyboardLayout(thread) or 0
         return LANGS.get(hkl & 0xFFFF)
-
-    @staticmethod
-    def _char(vk: int, layout: str, shift: bool | None = None) -> str | None:
-        pair = US_KEYS.get(vk)
-        if pair is None:
-            return None
-        if shift is None:
-            shift = _pressed(0x10)
-        caps = bool(user32.GetKeyState(0x14) & 1)
-        is_letter = 0x41 <= vk <= 0x5A or (layout == "ru" and vk in RU_LETTER_KEYS)
-        return pair[1] if shift != (caps and is_letter) else pair[0]
 
     # --- the worker: types fixes outside the hook ---
 
@@ -551,6 +726,10 @@ class AutoSwitcher(QObject):
                             done, self._last = self._last, None
                         if done is not None:
                             self._undo(done, job[2])
+                elif job[0] == "answer":
+                    self._type_answer(*job[1:])
+                elif job[0] == "flip":
+                    self._flip(*job[1:])
                 else:
                     self._undo(*job[1:])
             except Exception:
@@ -558,18 +737,31 @@ class AutoSwitcher(QObject):
             finally:
                 self._release_held()
 
-    def _apply(self, fix: Fix, hwnd: int, layout: str, delimiter: int = VK_SPACE) -> None:
+    def _apply(self, fix: Fix, hwnd: int, layout: str, delimiter: int, run: list[Press]) -> None:
         if process_name(hwnd).lower() in BROWSERS and browser_password(hwnd):
             type_fix(0, "", delimiter)  # a password field: leave the text alone
             with self._lock:
-                self.session.reset()
+                self._reset()
             return
         type_fix(fix.erase, fix.text, delimiter)
         self._switch(hwnd, fix.layout)
         with self._lock:
             # After Enter or Tab the text may already be sent or left behind: no undo then.
-            self._last = _Done(fix, layout) if delimiter == VK_SPACE else None
+            self._last = _Done(fix, layout, run) if delimiter == VK_SPACE else None
         self.corrected.emit(fix.original, fix.text)
+
+    def _type_answer(self, erase: int, original: str, text: str, hwnd: int, delimiter: int) -> None:
+        type_fix(erase, text, delimiter)
+        self._switch(hwnd, "en")
+        log.info("terminal answer %r", text)
+        self.corrected.emit(original, text)
+
+    def _flip(self, erase: int, text: str, target: str, switch_layout: bool, hwnd: int) -> None:
+        _let_go_modifiers()
+        type_fix(erase, text, None)
+        if switch_layout:
+            self._switch(hwnd, target)
+        self.flipped.emit(text, target)
 
     def _undo(self, done: _Done, hwnd: int) -> None:
         """Takes the fix and its space back, returns the old layout and remembers the words."""
@@ -578,7 +770,11 @@ class AutoSwitcher(QObject):
         self._switch(hwnd, done.old_layout)
         with self._lock:
             self.session.reset()
-            self._buffer = list(fix.keys[-1])  # the caret is back at the end of that word
+            n = len(done.run) + 1
+            if len(self._line) >= n and self._line[-1].vk == VK_SPACE:
+                self._line[-n:] = done.run  # the caret is back at the end of that word
+            else:
+                self._reset()
         self.update_exceptions({keys.lower() for keys in fix.keys}, set())
         self.undone.emit(fix.original)
 
@@ -614,19 +810,25 @@ class AutoSwitcher(QObject):
             else:
                 inputs += [_key(vk), _key(vk, up=True)]
             with self._lock:
-                # Replayed keys carry MARKER and skip the hook: keep the word buffer in step here.
-                layout = self._layout(self._hwnd) or "en"
-                char = self._char(vk, layout, shift) if vk not in DELIMITERS else None
+                # Replayed keys carry MARKER and skip the hook: keep the line in step here.
+                layout = self._layout(self._hwnd)
                 if vk == VK_BACK:
-                    if self._buffer:
-                        self._buffer.pop()
+                    if self._line:
+                        if self._line.pop().vk == VK_SPACE:
+                            self.session.reset()
                     else:
-                        self.session.reset()
-                elif char is None:
-                    self._buffer.clear()
-                    self.session.reset()
+                        self._reset()
+                elif vk in (VK_RETURN, VK_TAB):
+                    self._reset("edge")
+                elif layout is None or self._window == "off":
+                    self._reset()
+                elif vk == VK_SPACE:
+                    self.session.reset()  # the word before it went unjudged
+                    self._append(Press(VK_SPACE, False, False, layout))
+                elif vk in US_KEYS:
+                    self._append(Press(vk, shift, _caps(), layout))
                 else:
-                    self._buffer.append(char)
+                    self._reset()
         _send(inputs)
 
     @staticmethod

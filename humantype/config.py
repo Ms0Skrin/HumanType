@@ -18,11 +18,16 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "HumanType"
 VK_PAUSE = 0x13
 
-# Programs where automatic switching stays off.
-DEFAULT_EXCLUDED = [
-    # terminals and consoles
+# Terminals and consoles: automatic switching is off there, but y/yes/n/no typed in Russian are fixed.
+TERMINAL_APPS = [
     "cmd.exe", "powershell.exe", "pwsh.exe", "WindowsTerminal.exe", "OpenConsole.exe", "conhost.exe",
     "mintty.exe", "putty.exe", "kitty.exe", "alacritty.exe", "wezterm-gui.exe",
+]
+TERMINALS = {name.lower() for name in TERMINAL_APPS}
+
+# Programs where automatic switching stays off.
+DEFAULT_EXCLUDED = [
+    *TERMINAL_APPS,
     # code editors and IDEs
     "Code.exe", "Cursor.exe", "devenv.exe", "sublime_text.exe", "idea64.exe", "pycharm64.exe",
     "webstorm64.exe", "rider64.exe", "clion64.exe", "goland64.exe", "phpstorm64.exe", "studio64.exe",
@@ -60,6 +65,7 @@ class Settings:
     autoswitch_short_words: bool = True
     autoswitch_skip_fullscreen: bool = True
     autoswitch_notify: bool = True
+    autoswitch_terminal_answers: bool = True  # н, нуы, т, тщ in a terminal → y, yes, n, no on Enter
     autoswitch_excluded: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDED))
 
     @classmethod

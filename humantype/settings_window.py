@@ -513,6 +513,7 @@ class SettingsWindow(QDialog):
         self.short_words = Toggle(settings.autoswitch_short_words)
         self.skip_fullscreen = Toggle(settings.autoswitch_skip_fullscreen)
         self.autoswitch_notify = Toggle(settings.autoswitch_notify)
+        self.terminal_answers = Toggle(settings.autoswitch_terminal_answers)
 
         picker = QComboBox()
         picker.setEditable(True)
@@ -546,6 +547,11 @@ class SettingsWindow(QDialog):
             row("Короткие слова", "«я», «в», «на», «не»… — решает по соседним словам", self.short_words),
             row("Не работать в полноэкранных приложениях", "Игры и полноэкранные программы", self.skip_fullscreen),
             row("Подсказка при исправлении", "Короткое уведомление у курсора: ghbdtn → привет", self.autoswitch_notify),
+            row(
+                "Ответы в терминале",
+                "н, нуы, т, тщ по Enter становятся y, yes, n, no — даже там, где автопереключение выключено",
+                self.terminal_answers,
+            ),
             self.excluded,
             self.exception_words,
         )
@@ -624,6 +630,7 @@ class SettingsWindow(QDialog):
             autoswitch_short_words=self.short_words.isChecked(),
             autoswitch_skip_fullscreen=self.skip_fullscreen.isChecked(),
             autoswitch_notify=self.autoswitch_notify.isChecked(),
+            autoswitch_terminal_answers=self.terminal_answers.isChecked(),
             autoswitch_excluded=self.excluded.items(),
         )
 
@@ -638,6 +645,7 @@ class SettingsWindow(QDialog):
         self.short_words.setChecked(defaults.autoswitch_short_words)
         self.skip_fullscreen.setChecked(defaults.autoswitch_skip_fullscreen)
         self.autoswitch_notify.setChecked(defaults.autoswitch_notify)
+        self.terminal_answers.setChecked(defaults.autoswitch_terminal_answers)
         self.excluded.set_items(list(DEFAULT_EXCLUDED))
         self.limit.setValue(defaults.history_limit)
         self.save_images.setChecked(defaults.save_images)

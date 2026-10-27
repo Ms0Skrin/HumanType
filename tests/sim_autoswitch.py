@@ -99,15 +99,17 @@ def post_message(hwnd, msg, w, hkl):
 
 
 box.switch_delay = 0.0
+box.app = "notepad.exe"
 A.type_fix = fake_type_fix
 A._send = fake_send
 A._pressed = lambda vk: vk in box.pressed
 A.focused_is_password = lambda h: False
-A.process_name = lambda h: "notepad.exe"
+A.process_name = lambda h: box.app
+A.is_fullscreen = lambda h: False
 A.win32api.PostMessage = post_message
 A.AutoSwitcher._layout = staticmethod(lambda hwnd: box.layout)
 A.AutoSwitcher._hkl = staticmethod(lambda lang: HKL[lang])
-A.AutoSwitcher._window_allowed = lambda self, h: True
+A.win32process.GetWindowThreadProcessId.return_value = (1, 2)
 A.user32.GetForegroundWindow.return_value = 1
 A.user32.GetKeyState.return_value = 0
 
@@ -146,13 +148,21 @@ def type_(s, wait=True):
     idle()
 
 
-def reset(layout="en", slow=0.0, switch_delay=0.0):
+def vkey(vk):
+    """A key that types nothing in the box: arrows, Home..."""
+    sw._handle(A.WM_KEYDOWN, A.KBDLLHOOKSTRUCT(vk, 0, 0, 0, 0))
+    idle()
+
+
+def reset(layout="en", slow=0.0, switch_delay=0.0, app="notepad.exe"):
     idle()
     box.text.clear()
     box.layout = layout
     box.slow = slow
     box.switch_delay = switch_delay
+    box.app = app
     sw.reset()
+    sw._hwnd = 0  # the next key comes to a new window: a word starts there
     sw.detector.exceptions = set()
 
 
@@ -192,6 +202,40 @@ type_("ghbdtn \b")
 words = initial | {"xyz"}
 sw.update_exceptions(words - initial, initial - words)
 check("settings merge keeps undo word", sorted(sw.detector.exceptions), ["abc", "ghbdtn", "xyz"])
+# the line: what was typed before the caret jumped is not fixed by its tail
+reset(); type_("abc"); vkey(0x25); type_("ghbdtn "); check("word begun before an arrow", box.s(), "abcghbdtn ")
+reset(); type_("abc"); vkey(0x25); type_(" ghbdtn "); check("next word after an arrow", box.s(), "abc привет ")
+reset(); type_("abc")
+with sw._lock:
+    sw._reset("click")
+type_("ghbdtn "); check("after a click", box.s(), "abcпривет ")
+# a word typed in two layouts: switched by hand in the middle
+reset(); type_("ghb"); box.layout = "ru"; type_("dtn "); check("mixed layouts untouched", box.s(), "ghbвет ")
+# the system's autorepeat: characters cannot be counted
+reset(); type_("g"); box.pressed.add(CHAR["g"][0]); key("g"); box.pressed.discard(CHAR["g"][0]); type_("hbdtn ")
+check("autorepeat stops the word", box.s(), "gghbdtn ")
+# Backspace over a space goes back into the word before
+reset(); sw.enabled = False; type_("ghbd "); sw.enabled = True; type_("\btn ")
+check("backspace back into a word", box.s(), "привет ")
+reset(); type_("ghbdtn \b"); check("undo", box.s(), "ghbdtn"); type_("\b\btn ")
+check("the word after undo stays", box.s(), "ghbdtn ")
+# terminal answers
+reset("ru", app="WindowsTerminal.exe"); type_("yes\n"); check("terminal: нуы → yes", box.s(), "yes\n"); check("terminal: layout en", box.layout, "en")
+reset("ru", app="WindowsTerminal.exe"); type_("n\n"); check("terminal: т → n", box.s(), "n\n")
+reset("ru", app="cmd.exe"); type_("no\n"); check("console: тщ → no", box.s(), "no\n")
+reset("ru", app="WindowsTerminal.exe"); type_("yes "); check("terminal: not on space", box.s(), "нуы ")
+reset(app="WindowsTerminal.exe"); type_("ghbdtn "); check("terminal: no autoswitch", box.s(), "ghbdtn ")
+reset("ru", app="notepad.exe"); type_("n\n"); check("not a terminal: т stays", box.s(), "т\n")
+sw.terminal_answers = False
+reset("ru", app="WindowsTerminal.exe"); type_("yes\n"); check("terminal answers off", box.s(), "нуы\n")
+sw.terminal_answers = True
+# the fix-layout hotkey flips what the hook followed, no clipboard
+reset(); sw.enabled = False; type_("ghbdtn"); check("flip: word", sw.flip(False), True); idle()
+check("flip: text", box.s(), "привет"); check("flip: layout", box.layout, "ru")
+reset(); type_("ghbdtn rfr"); sw.flip(True); idle(); check("flip: line", box.s(), "привет как")
+reset(); type_("ghbdtn rfr "); sw.flip(False); idle(); check("flip: word just finished", box.s(), "ghbdtn как ")
+reset(); type_("abc"); vkey(0x25); type_("ghbdtn"); check("flip: unknown start goes to the clipboard", sw.flip(False), False)
+sw.enabled = True
 # watchdog maths
 A.user32.GetLastInputInfo.side_effect = lambda p: (setattr(p._obj, "dwTime", 10_000), 1)[1]
 check("idle: input after hook", A._idle_ms(5_000), 5_000)

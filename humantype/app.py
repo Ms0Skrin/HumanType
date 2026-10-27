@@ -67,6 +67,7 @@ class HumanTypeApp:
         self.autoswitcher = AutoSwitcher(Detector(ASSETS_DIR / "dict"), EXCEPTIONS_FILE)
         self.autoswitcher.corrected.connect(self._on_corrected)
         self.autoswitcher.undone.connect(self._on_undone)
+        self.autoswitcher.flipped.connect(self._on_flipped)
         self.autoswitcher.start()
 
         self.hotkeys = Hotkeys()
@@ -130,6 +131,10 @@ class HumanTypeApp:
             settings.autoswitch_short_words,
             settings.autoswitch_skip_fullscreen,
             settings.autoswitch_excluded,
+            settings.autoswitch_terminal_answers,
+        )
+        self.autoswitcher.set_flip_hotkeys(
+            [(hotkey.mods, hotkey.vk) for hotkey in (settings.fix_word, settings.fix_line) if hotkey.is_set]
         )
         self._update_autoswitch_action()
         try:
@@ -200,12 +205,16 @@ class HumanTypeApp:
     # --- layout ---
 
     def fix_word(self) -> None:
-        self.autoswitcher.reset()
-        self.fixer.fix()
+        # The word just typed is typed again from the keys the hook saw; anything else (a selection,
+        # text typed before the caret last jumped) goes through the clipboard.
+        if not self.autoswitcher.flip(False, self.settings.switch_layout):
+            self.autoswitcher.reset()
+            self.fixer.fix()
 
     def fix_line(self) -> None:
-        self.autoswitcher.reset()
-        self.fixer.fix(whole_line=True)
+        if not self.autoswitcher.flip(True, self.settings.switch_layout):
+            self.autoswitcher.reset()
+            self.fixer.fix(whole_line=True)
 
     def toggle_autoswitch(self) -> None:
         self.settings.autoswitch = not self.settings.autoswitch
@@ -218,10 +227,14 @@ class HumanTypeApp:
         hotkey = hotkey_text(self.settings.toggle_autoswitch) if self.settings.toggle_autoswitch.is_set else ""
         self.autoswitch_action.setText(f"Автопереключение: {'вкл' if on else 'выкл'}	{hotkey}")
         self.autoswitch_action.setIcon(line_icon("swap", theme.ACCENT if on else theme.MUTED))
+        self.tray.setIcon(tray_icon(on))  # grey while switched off
 
     def _on_corrected(self, before: str, after: str) -> None:
         if self.settings.autoswitch_notify:
             self.toast.show_text(f"{before}  →  {after}", 1100)
+
+    def _on_flipped(self, text: str, lang: str) -> None:
+        self.notify(f"✓ {'РУ' if lang == 'ru' else 'EN'}: {text.strip()[:40]}")
 
     def _on_undone(self, word: str) -> None:
         self.toast.show_text(f"Оставил «{word}» как есть и запомнил", 1600)

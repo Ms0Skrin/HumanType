@@ -54,9 +54,12 @@ def app_icon() -> QIcon:
     return _svg_icon((ASSETS_DIR / "app.svg").read_bytes(), sizes=(16, 32, 48, 64, 128, 256))
 
 
-def tray_icon() -> QIcon:
-    """The tray glyph has no background: on a light taskbar its white strokes turn dark."""
+def tray_icon(enabled: bool = True) -> QIcon:
+    """The tray glyph has no background: on a light taskbar its white strokes turn dark.
+    With automatic switching off its blue half turns grey."""
     svg = (ASSETS_DIR / "tray.svg").read_text(encoding="utf-8")
+    if not enabled:
+        svg = svg.replace('stroke="#38BDF8"', 'stroke="#64748B"')
     if theme.system_uses_light_theme():
         svg = svg.replace('stroke="white"', 'stroke="#0F172A"').replace('stroke="#38BDF8"', 'stroke="#0284C7"')
     return _svg_icon(svg.encode("utf-8"), sizes=(16, 20, 24, 32, 40, 48))
