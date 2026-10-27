@@ -6,7 +6,7 @@ set PY=.venv\Scripts\python.exe
 set ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe
 if not exist "%ISCC%" set ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe
 
-for /f %%v in ('%PY% -c "from humantype.paths import VERSION; print(VERSION)"') do set VER=%%v
+for /f %%v in ('%PY% -c "from humantype import __version__; print(__version__)"') do set VER=%%v
 echo === HumanType %VER%
 
 %PY% -m PyInstaller --noconfirm --clean HumanType.spec || goto :fail

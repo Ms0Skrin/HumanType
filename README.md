@@ -70,8 +70,10 @@ sudo pacman -S --needed git python-evdev python-gobject
 # Ubuntu:  sudo apt install git python3-evdev python3-gi
 
 git clone https://github.com/Ms0Skrin/HumanType.git ~/.local/share/humantype-app
-~/.local/share/humantype-app/linux/install.sh
+~/.local/share/humantype-app/linux/install.sh --release
 ```
+
+Версия у Windows и Linux одна: `--release` ставит последний релиз — тот же, что и установщик для Windows (`--release v0.6` — конкретный). Без `--release` ставится самый свежий код из `main`.
 
 Установщик один раз спросит пароль sudo, поставит пункт в меню приложений и службу, которая стартует при входе.
 
@@ -83,8 +85,10 @@ git clone https://github.com/Ms0Skrin/HumanType.git ~/.local/share/humantype-app
 <summary><b>Обновить, удалить, посмотреть журнал</b></summary>
 
 ```bash
-# обновить
-git -C ~/.local/share/humantype-app pull && ~/.local/share/humantype-app/linux/install.sh
+# обновить до последнего релиза
+~/.local/share/humantype-app/linux/install.sh --release
+# или до самого свежего кода
+git -C ~/.local/share/humantype-app checkout main && git -C ~/.local/share/humantype-app pull && ~/.local/share/humantype-app/linux/install.sh
 # удалить
 ~/.local/share/humantype-app/linux/install.sh --uninstall
 # журнал службы

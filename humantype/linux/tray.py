@@ -11,6 +11,8 @@ import gi
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
+from .. import __version__  # noqa: E402
+
 log = logging.getLogger(__name__)
 
 WATCHER = ("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher")
@@ -81,7 +83,7 @@ class Tray:
             "Status": GLib.Variant("s", "Active"),
             "IconName": GLib.Variant("s", icon),
             "IconThemePath": GLib.Variant("s", self._icon_dir),
-            "ToolTip": GLib.Variant("(sa(iiay)ss)", (icon, [], "HumanType", self._text() + "\nНажмите, чтобы переключить")),
+            "ToolTip": GLib.Variant("(sa(iiay)ss)", (icon, [], f"HumanType {__version__}", self._text() + "\nНажмите, чтобы переключить")),
             "ItemIsMenu": GLib.Variant("b", False),
             "Menu": GLib.Variant("o", "/NO_DBUSMENU"),
         }

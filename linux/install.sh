@@ -6,6 +6,8 @@
 #   4. the systemd user service that starts with the session.
 # Run from anywhere: linux/install.sh        Remove: linux/install.sh --uninstall
 # Without the autostarting service (for testing): linux/install.sh --no-service
+# A release, the same as the Windows installer of that version: linux/install.sh --release [v0.6]
+#   (without a tag, the newest one; back to the newest code: git checkout main && git pull, then install.sh)
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,6 +37,15 @@ enabled_add() {
     fi
 }
 
+if [[ "${1:-}" == "--release" ]]; then
+    git -C "$APP_DIR" fetch --quiet --tags origin
+    TAG="${2:-$(git -C "$APP_DIR" tag --list 'v*' --sort=-v:refname | head -n 1)}"
+    [[ -n "$TAG" ]] || { echo "No releases found"; exit 1; }
+    echo "== release $TAG"
+    git -C "$APP_DIR" -c advice.detachedHead=false checkout --quiet "$TAG"
+    exec "$APP_DIR/linux/install.sh"
+fi
+
 if [[ "${1:-}" == "--uninstall" ]]; then
     systemctl --user disable --now humantype.service 2>/dev/null || true
     rm -f "$UNIT_DIR/humantype.service" "$AUTOSTART"
@@ -54,6 +65,8 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     exit 0
 fi
 
+VERSION=$(PYTHONPATH="$APP_DIR" python3 -c 'from humantype import __version__; print(__version__)' 2>/dev/null || echo "?")
+echo "== HumanType $VERSION"
 echo "== checking dependencies"
 python3 -c 'import evdev, gi; gi.require_version("Gio", "2.0")' 2>/dev/null || {
     echo "Need python-evdev and python-gobject:"

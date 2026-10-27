@@ -50,7 +50,12 @@ jobs:
         id: ver
         shell: bash
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"; else v="$(python -c 'from humantype.paths import VERSION; print(VERSION)')"; fi
+          v="$(python -c 'from humantype import __version__; print(__version__)')"
+          # One version for Windows and Linux: a release tag must name the version in the code.
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$v" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match humantype.__version__ = $v"
+            exit 1
+          fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
       - name: PyInstaller
         run: python -m PyInstaller --noconfirm --clean HumanType.spec

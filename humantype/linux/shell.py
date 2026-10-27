@@ -9,6 +9,7 @@ import gi
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
+from .. import __version__  # noqa: E402
 from .engine import ShellState  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ DAEMON_XML = """
       <arg type="b" direction="in" name="on"/>
     </method>
     <property name="Enabled" type="b" access="read"/>
+    <property name="Version" type="s" access="read"/>
     <signal name="EnabledChanged">
       <arg type="b" name="on"/>
     </signal>
@@ -152,6 +154,8 @@ class DaemonService:
     def _property(self, _conn, _sender, _path, _iface, name):
         if name == "Enabled":
             return GLib.Variant("b", self._get())
+        if name == "Version":
+            return GLib.Variant("s", __version__)
         return None
 
     def enabled_changed(self, on: bool) -> None:

@@ -49,6 +49,7 @@ const DAEMON_IFACE = `
       <arg type="b" direction="in" name="on"/>
     </method>
     <property name="Enabled" type="b" access="read"/>
+    <property name="Version" type="s" access="read"/>
     <signal name="EnabledChanged">
       <arg type="b" name="on"/>
     </signal>
@@ -297,6 +298,8 @@ export default class HumanTypeExtension extends Extension {
                 }
                 proxy.connectSignal('EnabledChanged', (_p, _sender, [on]) => this._showEnabled(on));
                 this._showEnabled(proxy.Enabled);
+                if (proxy.Version)
+                    this._indicator.toggle.title = `HumanType ${proxy.Version}`;
             });
     }
 

@@ -20,6 +20,7 @@ from evdev import ecodes as e
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
+from .. import __version__  # noqa: E402
 from ..detector import Detector  # noqa: E402
 from . import config  # noqa: E402
 from .devices import (Keyboard, can_read_any, is_keyboard, is_pointer, is_virtual, list_devices,  # noqa: E402
@@ -88,7 +89,7 @@ class Daemon:
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self._quit)
         threading.Thread(target=self._watchdog, name="watchdog", daemon=True).start()
-        log.info("started on %s; %s", self.shell.name,
+        log.info("HumanType %s started on %s; %s", __version__, self.shell.name,
                  "taking the keyboards" if self.shell.present else "waiting for it to answer")
         try:
             self.loop.run()

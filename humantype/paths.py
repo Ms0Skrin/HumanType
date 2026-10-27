@@ -2,8 +2,9 @@ import os
 import sys
 from pathlib import Path
 
+from . import __version__ as VERSION  # noqa: F401  (one version for Windows and Linux)
+
 APP_NAME = "HumanType"
-VERSION = "0.5"
 
 
 def resource_dir() -> Path:
