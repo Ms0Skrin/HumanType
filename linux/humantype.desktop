@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=HumanType
+GenericName=Автопереключение раскладки
+Comment=Включить или выключить автопереключение раскладки
+Exec=env PYTHONPATH=@APP_DIR@ /usr/bin/python3 -m humantype.linux.ctl toggle
+Icon=humantype
+Terminal=false
+Categories=Utility;
+Keywords=keyboard;layout;раскладка;punto;
+StartupNotify=false

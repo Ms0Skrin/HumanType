@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF9A62"/>
+      <stop offset="0.55" stop-color="#E8573E"/>
+      <stop offset="1" stop-color="#B2325A"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="cap" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#F3ECE8"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF8A55"/>
+      <stop offset="1" stop-color="#C83A52"/>
+    </linearGradient>
+  </defs>
+
+  <!-- squircle background -->
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="url(#bg)"/>
+  <rect x="8" y="8" width="240" height="120" rx="58" fill="url(#gloss)"/>
+
+  <!-- keycap: shadow, side, top -->
+  <rect x="44" y="62" width="168" height="160" rx="34" fill="#5A1530" opacity="0.28"/>
+  <rect x="44" y="52" width="168" height="158" rx="34" fill="#D9CBC4"/>
+  <rect x="44" y="44" width="168" height="150" rx="34" fill="url(#cap)"/>
+
+  <!-- letters -->
+  <text x="98" y="122" text-anchor="middle" font-family="Segoe UI, Arial" font-weight="800" font-size="68" fill="#2A2730">A</text>
+  <text x="160" y="176" text-anchor="middle" font-family="Segoe UI, Arial" font-weight="800" font-size="68" fill="#E04E3C">Я</text>
+
+  <!-- swap arrows -->
+  <path d="M138 70 Q180 72 182 106" fill="none" stroke="url(#arrow)" stroke-width="11" stroke-linecap="round"/>
+  <path d="M170 98 L182 114 L194 98" fill="none" stroke="url(#arrow)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M118 170 Q76 168 74 134" fill="none" stroke="#3A3540" stroke-width="11" stroke-linecap="round"/>
+  <path d="M62 142 L74 126 L86 142" fill="none" stroke="#3A3540" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,15 @@
+[Unit]
+Description=HumanType keyboard layout switcher
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m humantype.linux
+Environment=PYTHONPATH=@APP_DIR@
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

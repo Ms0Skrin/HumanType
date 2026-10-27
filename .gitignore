@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+# the person's own settings, history and logs
+data/
+# raw text the dictionaries were built from: big, and rebuilt by tools/fetch_wiki.py
+tools/raw/
+# Windows builds
+build/
+dist/
+Output/
+*.lnk
+.venv/
+venv/
+.idea/
+.vscode/
+.ruff_cache/

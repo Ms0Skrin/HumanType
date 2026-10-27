@@ -1,0 +1,7 @@
+# HumanType: the user at the seat may read keyboards, mice and touchpads and make virtual keyboards.
+# "uaccess" gives the logged-in user an ACL on the device, as is done for sound cards and cameras.
+# The number must stay below 73 (73-seat-late.rules applies the ACLs).
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_TOUCHPAD}=="1", TAG+="uaccess"
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

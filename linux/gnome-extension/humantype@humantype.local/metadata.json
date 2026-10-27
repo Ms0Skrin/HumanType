@@ -1,0 +1,6 @@
+{
+  "uuid": "humantype@humantype.local",
+  "name": "HumanType",
+  "description": "Helper for the HumanType layout switcher: reports and switches the keyboard layout, tells what kind of field has the focus, shows short notes. The switching itself is done by the humantype service.",
+  "shell-version": ["46", "47", "48", "49", "50", "51"]
+}

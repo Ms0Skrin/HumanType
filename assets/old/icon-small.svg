@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF9A62"/>
+      <stop offset="0.55" stop-color="#E8573E"/>
+      <stop offset="1" stop-color="#B2325A"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="62" height="62" rx="15" fill="url(#bg)"/>
+  <rect x="11" y="13" width="42" height="40" rx="9" fill="#D9CBC4"/>
+  <rect x="11" y="10" width="42" height="40" rx="9" fill="#FFFFFF"/>
+  <text x="32" y="43" text-anchor="middle" font-family="Segoe UI, Arial" font-weight="900" font-size="34" fill="#E04E3C">Я</text>
+</svg>

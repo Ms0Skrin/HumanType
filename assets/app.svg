@@ -1,0 +1,13 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="256" height="256" rx="60" fill="url(#hm_bg1)" />
+  <!-- Часть H -->
+  <path d="M52 76V180M52 128H112M112 76V180" stroke="white" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" />
+  <!-- Переход в M -->
+  <path d="M112 76L158 136L204 76V180" stroke="#38BDF8" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" />
+  <defs>
+    <linearGradient id="hm_bg1" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1E1B4B" />
+      <stop offset="1" stop-color="#0F172A" />
+    </linearGradient>
+  </defs>
+</svg>
