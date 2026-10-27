@@ -1,0 +1,43 @@
+<svg width="1280" height="400" viewBox="0 0 1280 400" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="400" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1E1B4B"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1050 90) scale(520 320)">
+      <stop stop-color="#38BDF8" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#38BDF8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="logo" x1="0" y1="0" x2="200" y2="200" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#312E81"/>
+      <stop offset="1" stop-color="#1E293B"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="400" rx="28" fill="url(#bg)"/>
+  <rect width="1280" height="400" rx="28" fill="url(#glow)"/>
+  <g opacity="0.07" stroke="#ffffff">
+    <path d="M0 80H1280M0 160H1280M0 240H1280M0 320H1280"/>
+    <path d="M160 0V400M320 0V400M480 0V400M640 0V400M800 0V400M960 0V400M1120 0V400"/>
+  </g>
+  <g transform="translate(96 100)">
+    <rect width="200" height="200" rx="48" fill="url(#logo)" stroke="#38BDF8" stroke-opacity="0.35" stroke-width="2"/>
+    <path d="M40.6 59.4V140.6M40.6 100H87.5M87.5 59.4V140.6" stroke="white" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M87.5 59.4L123.4 106.3L159.4 59.4V140.6" stroke="#38BDF8" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="360" y="178" fill="#F8FAFC" font-family="Inter, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="76" font-weight="800" letter-spacing="-1.5">HumanType</text>
+  <text x="362" y="228" fill="#CBD5E1" font-family="Inter, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="28" font-weight="500">Автопереключение раскладки ru / en</text>
+  <g font-family="'JetBrains Mono', 'Cascadia Code', Consolas, 'DejaVu Sans Mono', monospace" font-size="30">
+    <rect x="360" y="262" width="340" height="58" rx="14" fill="#0B1222" stroke="#334155"/>
+    <text x="384" y="301" fill="#94A3B8">ghbdtn</text>
+    <text x="510" y="301" fill="#38BDF8">→</text>
+    <text x="556" y="301" fill="#F8FAFC" font-weight="700">привет</text>
+  </g>
+  <g font-family="Inter, 'Segoe UI', Roboto, Arial, sans-serif" font-size="20" font-weight="600">
+    <rect x="818" y="270" width="132" height="42" rx="21" fill="#38BDF8" fill-opacity="0.12" stroke="#38BDF8" stroke-opacity="0.5"/>
+    <text x="884" y="298" fill="#7DD3FC" text-anchor="middle">Windows</text>
+    <rect x="964" y="270" width="104" height="42" rx="21" fill="#38BDF8" fill-opacity="0.12" stroke="#38BDF8" stroke-opacity="0.5"/>
+    <text x="1016" y="298" fill="#7DD3FC" text-anchor="middle">Linux</text>
+    <rect x="1082" y="270" width="110" height="42" rx="21" fill="#38BDF8" fill-opacity="0.12" stroke="#38BDF8" stroke-opacity="0.5"/>
+    <text x="1137" y="298" fill="#7DD3FC" text-anchor="middle">GNOME</text>
+  </g>
+</svg>
