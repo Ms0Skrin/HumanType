@@ -45,7 +45,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Dependencies
-        run: pip install pyside6 pywin32 pyinstaller
+        run: pip install pyside6 pywin32 comtypes pyinstaller
       - name: Version
         id: ver
         shell: bash

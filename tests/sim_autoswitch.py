@@ -104,6 +104,10 @@ A.type_fix = fake_type_fix
 A._send = fake_send
 A._pressed = lambda vk: vk in box.pressed
 A.focused_is_password = lambda h: False
+# The field tells what is before the caret only when a test says so: None (it does not tell),
+# "box" (the fake text box), or any text.
+field = {"says": None}
+A.uia.text_before_caret = lambda n: (box.s() if field["says"] == "box" else field["says"])[-n:] if field["says"] is not None else None
 A.process_name = lambda h: box.app
 A.is_fullscreen = lambda h: False
 A.win32api.PostMessage = post_message
@@ -236,6 +240,22 @@ reset(); type_("ghbdtn rfr"); sw.flip(True); idle(); check("flip: line", box.s()
 reset(); type_("ghbdtn rfr "); sw.flip(False); idle(); check("flip: word just finished", box.s(), "ghbdtn как ")
 reset(); type_("abc"); vkey(0x25); type_("ghbdtn"); check("flip: unknown start goes to the clipboard", sw.flip(False), False)
 sw.enabled = True
+# the field tells what is before the caret (UI Automation)
+field["says"] = "box"
+reset(); type_("abc "); vkey(0x25); type_("ghbdtn "); check("field: a word begins after an arrow", box.s(), "abc привет ")
+reset(); type_("abc"); vkey(0x25); type_("ghbdtn "); check("field: the middle of a word", box.s(), "abcghbdtn ")
+reset(); type_("abc"); vkey(0x25); type_("ghbdtn rfr "); check("field: the line goes on after it", box.s(), "abcghbdtn как ")
+reset(); type_("ghbdtn "); check("field: agrees", box.s(), "привет ")
+field["says"] = "autocompleted"
+reset(); type_("ghbdtn "); check("field: other text, no fix", box.s(), "ghbdtn ")
+field["says"] = "box"
+reset(); type_("ghbdtn "); field["says"] = "something else "; type_("\b")
+check("field: undo skipped when the text changed", box.s(), "привет"); check("field: no exception", sw.detector.exceptions, set())
+field["says"] = "box"
+reset(); sw.enabled = False; type_("ghbdtn"); field["says"] = "other"; sw.flip(False); idle()
+check("field: flip leaves other text alone", box.s(), "ghbdtn"); check("field: flip forgets the line", sw._line, [])
+sw.enabled = True
+field["says"] = None
 # watchdog maths
 A.user32.GetLastInputInfo.side_effect = lambda p: (setattr(p._obj, "dwTime", 10_000), 1)[1]
 check("idle: input after hook", A._idle_ms(5_000), 5_000)

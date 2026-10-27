@@ -28,6 +28,7 @@ import win32gui
 import win32process
 from PySide6.QtCore import QObject, Signal
 
+from . import uia
 from .config import DEFAULT_EXCLUDED, TERMINALS
 from .detector import SENSITIVITY, Detector, Fix, Session
 from .layout import EN_TO_RU, LANG_EN, LANG_RU
@@ -154,6 +155,7 @@ MOD_KEYS = ((0x12, 0x0001), (0x11, 0x0002), (0x10, 0x0004), (0x5B, 0x0008), (0x5
 MAX_LINE = 300
 # A terminal asking [y/N]: these answers typed in the Russian layout (н, нуы, т, тщ) are fixed on Enter.
 ANSWERS = {"y", "yes", "n", "no"}
+WORD_EDGE = set(" \t\n([{<«\"'„“/")  # what may stand right before a word begins
 
 
 @dataclass(frozen=True)
@@ -353,6 +355,7 @@ class AutoSwitcher(QObject):
     corrected = Signal(str, str)  # before, after
     undone = Signal(str)  # the word now kept as typed
     flipped = Signal(str, str)  # the text now typed, its layout
+    lost_track = Signal(bool)  # a flip found other text before the caret: the clipboard fixer takes it, whole line or not
 
     def __init__(self, detector: Detector, exceptions_file: Path) -> None:
         super().__init__()
@@ -637,15 +640,13 @@ class AutoSwitcher(QObject):
             self.session.reset()
             self._finish(vk)
             return False
-        if start == 0 and self._origin == "unknown":
-            log.info("not fixing %r: the word began before we started following it", fix.original)
-            self.session.reset()
-            self._finish(vk)
-            return False
+        # Where the run starts the line, what came before it decides whether a word begins there;
+        # unless that is sure, the worker asks the field.
+        origin = self._origin if start == 0 else "edge"
         self._line[start:] = [replace(p, layout=fix.layout) for p in run]
         self._finish(vk)
         self._busy = True
-        self._jobs.put(("fix", fix, hwnd, layout, vk, run))
+        self._jobs.put(("fix", fix, hwnd, layout, vk, run, origin))
         return True
 
     def _answer(self, vk: int, hwnd: int, layout: str) -> bool:
@@ -678,12 +679,13 @@ class AutoSwitcher(QObject):
             letters = [p for p in run if p.vk != VK_SPACE]
             if not letters or any(p.layout != letters[-1].layout for p in letters):
                 return False
-            target = other(letters[-1].layout)
+            source = letters[-1].layout
+            target = other(source)
             self._line[start:] = [replace(p, layout=target) for p in run]
             self.session.reset()
             self._last = None
             self._busy = True
-            self._jobs.put(("flip", len(run), render(run, target), target, switch_layout, hwnd))
+            self._jobs.put(("flip", render(run, source), render(run, target), target, switch_layout, hwnd, whole_line))
             return True
 
     # --- helpers for the hook ---
@@ -737,11 +739,40 @@ class AutoSwitcher(QObject):
             finally:
                 self._release_held()
 
-    def _apply(self, fix: Fix, hwnd: int, layout: str, delimiter: int, run: list[Press]) -> None:
-        if process_name(hwnd).lower() in BROWSERS and browser_password(hwnd):
-            type_fix(0, "", delimiter)  # a password field: leave the text alone
+    def _field_says(self, expect: str, origin: str = "edge") -> str:
+        """Why the text before the caret forbids typing over `expect`, or "": "changed" when it is
+        not what was typed (autocompletion, a selection typed over, the app changed it), "middle"
+        when a word may begin before it. origin: what came before `expect` in the line we follow."""
+        before = uia.text_before_caret(len(expect) + 1)
+        if before is not None and not before.endswith(expect):
+            time.sleep(0.03)  # it may just be late with the last key
+            before = uia.text_before_caret(len(expect) + 1)
+            if before is not None and not before.endswith(expect):
+                return "changed"
+        if origin == "edge":
+            return ""
+        if before is None:
+            return "" if origin == "click" else "middle"  # a click most likely lands between words
+        return "middle" if len(before) > len(expect) and before[-len(expect) - 1] not in WORD_EDGE else ""
+
+    def _apply(self, fix: Fix, hwnd: int, layout: str, delimiter: int, run: list[Press], origin: str = "edge") -> None:
+        why = self._field_says(fix.original, origin)
+        if not why and process_name(hwnd).lower() in BROWSERS and browser_password(hwnd):
+            why = "password"
+        if why:
+            log.info("not fixing %r: %s", fix.original, {
+                "changed": "the text before the caret is not what was typed",
+                "middle": "the word began before we started following it",
+                "password": "a password field",
+            }[why])
+            type_fix(0, "", delimiter)  # leave the text alone, let the delimiter through
             with self._lock:
-                self._reset()
+                self.session.reset()
+                n = len(run) + 1
+                if why == "middle" and delimiter == VK_SPACE and len(self._line) >= n:
+                    self._line[-n:-1] = run  # the line is right, only the word stays as typed
+                elif delimiter == VK_SPACE:
+                    self._reset()
             return
         type_fix(fix.erase, fix.text, delimiter)
         self._switch(hwnd, fix.layout)
@@ -756,9 +787,15 @@ class AutoSwitcher(QObject):
         log.info("terminal answer %r", text)
         self.corrected.emit(original, text)
 
-    def _flip(self, erase: int, text: str, target: str, switch_layout: bool, hwnd: int) -> None:
+    def _flip(self, original: str, text: str, target: str, switch_layout: bool, hwnd: int, whole_line: bool) -> None:
         _let_go_modifiers()
-        type_fix(erase, text, None)
+        if self._field_says(original) == "changed":
+            log.info("flip: the text before the caret is not what was typed, the clipboard takes over")
+            with self._lock:
+                self._reset()
+            self.lost_track.emit(whole_line)
+            return
+        type_fix(len(original), text, None)
         if switch_layout:
             self._switch(hwnd, target)
         self.flipped.emit(text, target)
@@ -766,6 +803,13 @@ class AutoSwitcher(QObject):
     def _undo(self, done: _Done, hwnd: int) -> None:
         """Takes the fix and its space back, returns the old layout and remembers the words."""
         fix = done.fix
+        before = uia.text_before_caret(len(fix.text) + 1)
+        if before is not None and not before.lower().endswith((fix.text + " ").lower()):
+            log.info("undo skipped: the text before the caret changed")
+            type_fix(0, "", VK_BACK)  # the Backspace goes through as an ordinary one
+            with self._lock:
+                self._reset()
+            return
         type_fix(len(fix.text) + 1, fix.original, None)
         self._switch(hwnd, done.old_layout)
         with self._lock:

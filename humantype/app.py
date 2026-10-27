@@ -68,6 +68,7 @@ class HumanTypeApp:
         self.autoswitcher.corrected.connect(self._on_corrected)
         self.autoswitcher.undone.connect(self._on_undone)
         self.autoswitcher.flipped.connect(self._on_flipped)
+        self.autoswitcher.lost_track.connect(self.fixer.fix)
         self.autoswitcher.start()
 
         self.hotkeys = Hotkeys()
