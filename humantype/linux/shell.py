@@ -27,6 +27,12 @@ DAEMON_XML = """
     <signal name="EnabledChanged">
       <arg type="b" name="on"/>
     </signal>
+    <method name="WindowChanged">
+      <arg type="s" direction="in" name="wm_class"/>
+      <arg type="s" direction="in" name="app"/>
+      <arg type="b" direction="in" name="fullscreen"/>
+      <arg type="i" direction="in" name="pid"/>
+    </method>
   </interface>
 </node>
 """
@@ -34,11 +40,12 @@ CALL_TIMEOUT_MS = 300
 
 
 class ShellClient:
-    """Calls into the extension. Every call is synchronous with a short timeout: the keyboard
+    """The GNOME backend: calls into the extension. Every call is synchronous with a short timeout: the keyboard
     waits meanwhile, so a shell that does not answer must not hold it for long."""
 
     def __init__(self, on_layout: Callable[[str | None], None], on_focus: Callable[[], None],
                  on_appeared: Callable[[], None], on_vanished: Callable[[], None] = lambda: None) -> None:
+        self.name = "GNOME Shell extension"
         self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         self.present = False
         self._on_layout = on_layout
@@ -117,12 +124,15 @@ class ShellClient:
 
 
 class DaemonService:
-    """org.humantype.Daemon: lets the extension's toggle turn automatic switching on and off."""
+    """org.humantype.Daemon: lets the extension's toggle (and the menu entry) turn automatic
+    switching on and off; on KDE, the KWin script reports the focused window to it."""
 
-    def __init__(self, bus: Gio.DBusConnection, get_enabled: Callable[[], bool], set_enabled: Callable[[bool], None]) -> None:
+    def __init__(self, bus: Gio.DBusConnection, get_enabled: Callable[[], bool], set_enabled: Callable[[bool], None],
+                 on_window: Callable[[str, str, bool, int], None] | None = None) -> None:
         self.bus = bus
         self._get = get_enabled
         self._set = set_enabled
+        self._on_window = on_window  # the KWin script reports the focused window here
         info = Gio.DBusNodeInfo.new_for_xml(DAEMON_XML).interfaces[0]
         self._reg = bus.register_object(DAEMON_PATH, info, self._method, self._property, None)
         self._own = Gio.bus_own_name_on_connection(bus, DAEMON_NAME, Gio.BusNameOwnerFlags.NONE, None,
@@ -131,6 +141,10 @@ class DaemonService:
     def _method(self, _conn, _sender, _path, _iface, method, params, invocation) -> None:
         if method == "SetEnabled":
             self._set(params.unpack()[0])
+            invocation.return_value(None)
+        elif method == "WindowChanged":
+            if self._on_window:
+                self._on_window(*params.unpack())
             invocation.return_value(None)
         else:
             invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method)

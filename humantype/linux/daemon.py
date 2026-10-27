@@ -25,7 +25,9 @@ from . import config  # noqa: E402
 from .devices import (Keyboard, can_read_any, is_keyboard, is_pointer, is_virtual, list_devices,  # noqa: E402
                       make_twin, open_device, wait_unpressed)
 from .engine import Engine, ShellState  # noqa: E402
-from .shell import DaemonService, ShellClient  # noqa: E402
+from . import desktops  # noqa: E402
+from .shell import DaemonService  # noqa: E402
+from .tray import Tray  # noqa: E402
 
 log = logging.getLogger("humantype")
 
@@ -53,8 +55,17 @@ class Daemon:
         self.heartbeat = time.monotonic()
         self._stopping = False
 
-        self.shell = ShellClient(self._on_layout, self.engine.on_focus, self._on_shell, self._on_shell_gone)
-        self.service = DaemonService(self.shell.bus, lambda: self.engine.settings.autoswitch, self.set_enabled)
+        self.desktop = desktops.detect()
+        self.shell = desktops.connect(self.desktop, self._on_layout, self.engine.on_focus, self._on_shell,
+                                      self._on_shell_gone)
+        self.service = DaemonService(self.shell.bus, lambda: self.engine.settings.autoswitch, self.set_enabled,
+                                     getattr(self.shell, "window_changed", None))
+        # Outside GNOME (which has the extension's icon) a tray icon; the installer puts its images
+        # in the icon theme as humantype and humantype-off.
+        self.tray = None
+        if self.desktop != "gnome":
+            self.tray = Tray(self.shell.bus, lambda: self.set_enabled(not self.engine.settings.autoswitch), "")
+            self.tray.show(self.settings.autoswitch)
 
     # --- life cycle ---
 
@@ -77,7 +88,8 @@ class Daemon:
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self._quit)
         threading.Thread(target=self._watchdog, name="watchdog", daemon=True).start()
-        log.info("started; %s", "taking the keyboards" if self.shell.present else "waiting for the GNOME Shell extension")
+        log.info("started on %s; %s", self.shell.name,
+                 "taking the keyboards" if self.shell.present else "waiting for it to answer")
         try:
             self.loop.run()
         finally:
@@ -96,6 +108,8 @@ class Daemon:
             GLib.source_remove(watch)
             dev.close()
         self.pointers.clear()
+        if self.tray:
+            self.tray.close()
         self.service.close()
 
     def _beat(self) -> bool:
@@ -349,6 +363,8 @@ class Daemon:
         self.settings = self.engine.settings
         config.save(self.settings)
         self.service.enabled_changed(self.settings.autoswitch)
+        if self.tray:
+            self.tray.show(self.settings.autoswitch)
 
     def _exceptions_added(self, _words: set[str]) -> None:
         config.save_exceptions(self.engine.detector.exceptions)
@@ -365,6 +381,8 @@ class Daemon:
                 self.settings = settings
                 self.engine.configure(settings)
                 self.service.enabled_changed(settings.autoswitch)
+                if self.tray:
+                    self.tray.show(settings.autoswitch)
         elif name == config.EXCEPTIONS_FILE.name:
             self.engine.detector.exceptions = config.load_exceptions()
 
@@ -372,4 +390,9 @@ class Daemon:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(levelname)s %(name)s: %(message)s")
+    if not desktops.detect():
+        log.error("this desktop is not supported: GNOME, KDE Plasma, Hyprland, Sway or any desktop on X11 "
+                  "(XDG_CURRENT_DESKTOP=%r); HUMANTYPE_DESKTOP=... picks one by hand",
+                  os.environ.get("XDG_CURRENT_DESKTOP", ""))
+        return 2
     return Daemon().run()

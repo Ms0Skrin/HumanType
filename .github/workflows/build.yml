@@ -28,8 +28,16 @@ jobs:
       - name: Windows logic (Win32 faked)
         run: python tests/sim_autoswitch.py
 
+  desktops:
+    # The KDE, Hyprland, Sway backends against fake compositors; system Python for PyGObject.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y python3-gi python3-evdev dbus gir1.2-atspi-2.0
+      - run: dbus-run-session -- /usr/bin/python3 tests/linux_desktops.py
+
   windows:
-    needs: tests
+    needs: [tests, desktops]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
