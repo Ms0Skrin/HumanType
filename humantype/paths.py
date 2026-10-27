@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "HumanType"
-VERSION = "0.3"
+VERSION = "0.4"
 
 
 def resource_dir() -> Path:
