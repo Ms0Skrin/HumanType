@@ -35,10 +35,32 @@ DAEMON_XML = """
       <arg type="b" direction="in" name="fullscreen"/>
       <arg type="i" direction="in" name="pid"/>
     </method>
+    <!-- Clipboard history: the GNOME Shell extension reports what is copied (a picture as a PNG
+         file it wrote), shows the list and asks for an item when one is picked. -->
+    <method name="ClipboardAdd">
+      <arg type="s" direction="in" name="text"/>
+      <arg type="s" direction="in" name="png"/>
+    </method>
+    <method name="HistoryGet">
+      <arg type="u" direction="in" name="id"/>
+      <arg type="s" direction="out" name="kind"/>
+      <arg type="s" direction="out" name="text"/>
+      <arg type="s" direction="out" name="image"/>
+    </method>
+    <method name="HistoryPin">
+      <arg type="u" direction="in" name="id"/>
+    </method>
+    <method name="HistoryDelete">
+      <arg type="u" direction="in" name="id"/>
+    </method>
+    <method name="HistoryDone">
+      <arg type="u" direction="in" name="id"/>
+    </method>
   </interface>
 </node>
 """
 CALL_TIMEOUT_MS = 300
+HISTORY_METHODS = {"ClipboardAdd", "HistoryGet", "HistoryPin", "HistoryDelete", "HistoryDone"}
 
 
 class ShellClient:
@@ -117,6 +139,14 @@ class ShellClient:
         result = self._call("SetLayout", GLib.Variant("(s)", (lang,)), "(b)")
         return bool(result and result[0])
 
+    def show_history(self, items: list[tuple[int, str, str, str, bool]]) -> bool:
+        """Opens the clipboard history at the caret: (id, kind, what to show, picture path, pinned)."""
+        if not self.present:
+            return False
+        self.bus.call(SHELL_NAME, SHELL_PATH, "org.humantype.Shell", "ShowHistory",
+                      GLib.Variant("(a(ussb))", (items,)), None, Gio.DBusCallFlags.NO_AUTO_START, -1, None, None)
+        return True
+
     def note(self, kind: str, text: str) -> None:
         if not self.present:
             return
@@ -130,8 +160,10 @@ class DaemonService:
     switching on and off; on KDE, the KWin script reports the focused window to it."""
 
     def __init__(self, bus: Gio.DBusConnection, get_enabled: Callable[[], bool], set_enabled: Callable[[bool], None],
-                 on_window: Callable[[str, str, bool, int], None] | None = None) -> None:
+                 on_window: Callable[[str, str, bool, int], None] | None = None,
+                 on_history: Callable[[str, tuple], tuple | None] | None = None) -> None:
         self.bus = bus
+        self._on_history = on_history  # the clipboard history's methods: (method, args) -> reply or None
         self._get = get_enabled
         self._set = set_enabled
         self._on_window = on_window  # the KWin script reports the focused window here
@@ -148,6 +180,14 @@ class DaemonService:
             if self._on_window:
                 self._on_window(*params.unpack())
             invocation.return_value(None)
+        elif method in HISTORY_METHODS and self._on_history:
+            try:
+                reply = self._on_history(method, params.unpack())
+            except Exception as error:
+                log.exception("history %s", method)
+                invocation.return_dbus_error("org.humantype.Error.Failed", str(error))
+                return
+            invocation.return_value(GLib.Variant("(sss)", reply) if method == "HistoryGet" else None)
         else:
             invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method)
 

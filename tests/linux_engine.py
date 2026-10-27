@@ -40,6 +40,8 @@ class Box:
         self.app = "org.gnome.TextEditor"
         self.switch_ok = True
         self.notes: list[str] = []
+        self.histories = 0  # times the clipboard history was opened
+        self.history_ok = True
 
     def key(self, code: int, value: int) -> None:
         if value == 0:
@@ -96,6 +98,10 @@ class Box:
     def note(self, kind, text):
         self.notes.append(text)
 
+    def history(self):
+        self.histories += 1
+        return self.history_ok
+
     def s(self):
         return "".join(self.text)
 
@@ -131,11 +137,13 @@ def combo(*codes):
 
 def reset(layout="en", **kw):
     box.text.clear()
+    box.histories, box.history_ok = 0, True
     box.layout = engine.layout = layout
     box.surrounding, box.purpose, box.app, box.switch_ok = True, "normal", "org.gnome.TextEditor", True
     for k, v in kw.items():
         setattr(box, k, v)
     box.notes.clear()
+    engine.suspended = False
     box.caps = engine.caps = False
     engine.reset("edge")
     detector.exceptions = set()
@@ -208,6 +216,29 @@ reset(); type_("ns ult? "); check("punctuation inside (ты где?)", box.s(), 
 reset(); type_("file.txt ")
 check("file name untouched", box.s(), "file.txt ")
 reset(); type_("https://github.com "); check("url untouched", box.s(), "https://github.com ")
+
+# clipboard history: Ctrl+Shift+V opens it, the keys go to the list while it is open
+reset(); type_("abc"); combo(e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT, e.KEY_V)
+check("history: Ctrl+Shift+V opens it", box.histories, 1); check("history: V swallowed", box.s(), "abc")
+engine.suspended = True; type_("ghbdtn "); check("history open: keys are not ours", box.s(), "abcghbdtn ")
+engine.suspended = False; engine.reset(); type_("ghbdtn "); check("history closed: fixing again", box.s(), "abcghbdtn привет ")
+reset(purpose="terminal"); combo(e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT, e.KEY_V)
+check("history: a terminal pastes with it", (box.histories, box.s()), (0, "V"))
+reset(history_ok=False); combo(e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT, e.KEY_V)
+check("history: none here, the key goes on", box.s(), "V")
+reset(); combo(e.KEY_LEFTCTRL, e.KEY_V); check("history: Ctrl+V is a paste", (box.histories, box.s()), (0, "v"))
+from humantype.linux.engine import parse_hotkey  # noqa: E402
+check("hotkey parse", parse_hotkey("Super + V"), (frozenset({"super"}), e.KEY_V))
+check("hotkey parse: nonsense", parse_hotkey("hyper+v"), None)
+# the store the history keeps
+import tempfile  # noqa: E402
+from humantype.clipstore import ClipStore  # noqa: E402
+d = Path(tempfile.mkdtemp())
+store = ClipStore(d / "h.db", d / "img", limit=2)
+store.add_text("один"); store.add_text("два"); store.add_text("один"); store.add_text("три")
+check("store: newest first, no repeats, limit", [i.text for i in store.items()], ["три", "один"])
+store.toggle_pin(store.items()[1].id); store.add_text("четыре"); store.add_text("пять")
+check("store: pinned stays", [i.text for i in store.items()], ["один", "пять", "четыре"])
 
 print("FAILS:", fails)
 sys.exit(1 if fails else 0)

@@ -72,6 +72,7 @@ class Output(Protocol):
     def shell_state(self, expect: str = "", ignore_case: bool = False) -> ShellState | None: ...
     def set_layout(self, lang: str) -> bool: ...
     def note(self, kind: str, text: str) -> None: ...
+    def history(self) -> bool: ...  # opens the clipboard history; False where there is none
 
 
 @dataclass
@@ -92,10 +93,31 @@ class Settings:
     notify: bool = True
     excluded: tuple[str, ...] = ()
     terminal_answers: bool = True  # y/yes/n/no typed in Russian in a terminal
+    history: bool = True  # clipboard history (GNOME)
+    history_hotkey: str = "ctrl+shift+v"  # left alone in terminals, where it pastes
+    history_limit: int = 100
+    history_images: bool = True
+
+
+MOD_GROUPS = {"ctrl": CTRLS, "shift": SHIFTS, "alt": ALTS, "super": METAS}
+
+
+def parse_hotkey(text: str) -> tuple[frozenset[str], int] | None:
+    """"ctrl+shift+v" -> ({"ctrl", "shift"}, KEY_V); None when it does not read."""
+    parts = [p.strip().lower() for p in text.split("+") if p.strip()]
+    if not parts or any(m not in MOD_GROUPS for m in parts[:-1]):
+        return None
+    code = getattr(e, f"KEY_{parts[-1].upper()}", None)
+    return (frozenset(parts[:-1]), code) if isinstance(code, int) else None
 
 
 def other(lang: str) -> str:
     return "ru" if lang == "en" else "en"
+
+
+def is_terminal(state: ShellState) -> bool:
+    names = {n.lower() for n in (state.app, state.wm_class) if n}
+    return state.purpose == "terminal" or any(fnmatch.fnmatchcase(n, t) for n in names for t in TERMINALS)
 
 
 def render(presses: list[Press], layout: str) -> str:
@@ -132,6 +154,8 @@ class Engine:
         # What came before line[0]: "edge" a word boundary for sure (start, Enter, a new field);
         # "click" most likely one; "unknown" maybe the middle of a word (arrows, a repeat, a paste).
         self._origin = "edge"
+        self._history_key = parse_hotkey(self.settings.history_hotkey) if self.settings.history else None
+        self.suspended = False  # the clipboard history is open: its keys are none of ours
 
     # --- configuration ---
 
@@ -139,6 +163,7 @@ class Engine:
         self.settings = settings
         self.detector.sensitivity = SENSITIVITY.get(settings.sensitivity, SENSITIVITY["normal"])
         self.detector.short_words = settings.short_words
+        self._history_key = parse_hotkey(settings.history_hotkey) if settings.history else None
         self.session.reset()
         self._undo = None
 
@@ -174,6 +199,10 @@ class Engine:
                 self._swallowed.discard(code)
                 return True
             return False
+        if self.suspended:
+            if value == 1:
+                self.down.add(code)
+            return False
         if value == 2:
             if code in self._swallowed:
                 return True
@@ -190,6 +219,10 @@ class Engine:
         if code == e.KEY_PAUSE:
             self._swallowed.add(code)
             self._hotkey()
+            return True
+        if self._is_history_key(code) and self.out.history():
+            self._swallowed.add(code)
+            self.reset()
             return True
         if self.down & (CTRLS | ALTS | METAS):
             self.reset()  # a shortcut: copy, paste, undo... the text may be anything now
@@ -258,10 +291,7 @@ class Engine:
                 or render(run, "en").lower() not in ANSWERS):
             return False
         state = self.out.shell_state()
-        if state is None or state.layout != "ru":
-            return False
-        names = {n.lower() for n in (state.app, state.wm_class) if n}
-        if state.purpose != "terminal" and not any(fnmatch.fnmatchcase(n, t) for n in names for t in TERMINALS):
+        if state is None or state.layout != "ru" or not is_terminal(state):
             return False
         if not self.out.set_layout("en"):
             return False
@@ -273,6 +303,14 @@ class Engine:
             self.out.note("fix", f"{render(run, 'ru')}  →  {render(run, 'en')}")
         self._finish(code)
         return True
+
+    def _is_history_key(self, code: int) -> bool:
+        if self._history_key is None or code != self._history_key[1]:
+            return False
+        if {name for name, keys in MOD_GROUPS.items() if self.down & keys} != self._history_key[0]:
+            return False
+        state = self.out.shell_state()
+        return state is None or not is_terminal(state)  # a terminal pastes with it
 
     def _delimiter(self, code: int) -> bool:
         if self._answer(code):

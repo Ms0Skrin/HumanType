@@ -21,6 +21,7 @@ gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
 from .. import __version__  # noqa: E402
+from ..clipstore import ClipStore  # noqa: E402
 from ..detector import Detector  # noqa: E402
 from . import config  # noqa: E402
 from .devices import (Keyboard, can_read_any, is_keyboard, is_pointer, is_virtual, list_devices,  # noqa: E402
@@ -34,6 +35,9 @@ log = logging.getLogger("humantype")
 
 # The word lists: next to the package while developing, or where a package put them.
 ASSETS_DIR = Path(os.environ.get("HUMANTYPE_ASSETS") or Path(__file__).resolve().parents[2] / "assets")
+# The clipboard history: history.db and its pictures.
+DATA_DIR = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "humantype"
+HISTORY_OPEN_LIMIT = 120  # seconds: the engine takes the keys back even if the list never says it closed
 
 KEY_DELAY = 0.0015  # between injected events: some apps lose keys that come all at once
 LAYOUT_SETTLE = 0.01  # after the shell reports the new layout in force
@@ -60,7 +64,9 @@ class Daemon:
         self.shell = desktops.connect(self.desktop, self._on_layout, self.engine.on_focus, self._on_shell,
                                       self._on_shell_gone)
         self.service = DaemonService(self.shell.bus, lambda: self.engine.settings.autoswitch, self.set_enabled,
-                                     getattr(self.shell, "window_changed", None))
+                                     getattr(self.shell, "window_changed", None), self._history_call)
+        self.store: ClipStore | None = None  # opened at the first copy
+        self._history_timer = 0
         # Outside GNOME (which has the extension's icon) a tray icon; the installer puts its images
         # in the icon theme as humantype and humantype-off.
         self.tray = None
@@ -347,6 +353,19 @@ class Daemon:
             time.sleep(LAYOUT_SETTLE)
         return ok
 
+    def history(self) -> bool:
+        show = getattr(self.shell, "show_history", None)  # GNOME only, for now
+        if show is None or not self.settings.history:
+            return False
+        items = [(i.id, i.kind, " ".join(i.text.split())[:300], i.image or "", i.pinned) for i in self._store().items()]
+        if not show(items):
+            return False
+        self.engine.suspended = True  # the keys go to the list now
+        if self._history_timer:
+            GLib.source_remove(self._history_timer)
+        self._history_timer = GLib.timeout_add_seconds(HISTORY_OPEN_LIMIT, self._history_closed)
+        return True
+
     def note(self, kind: str, text: str) -> None:
         if kind == "toggle":
             self._enabled_changed()
@@ -367,6 +386,57 @@ class Daemon:
         if self.tray:
             self.tray.show(self.settings.autoswitch)
 
+    # --- clipboard history ---
+
+    def _store(self) -> ClipStore:
+        if self.store is None:
+            self.store = ClipStore(DATA_DIR / "history.db", DATA_DIR / "images", self.settings.history_limit)
+        return self.store
+
+    def _history_call(self, method: str, args: tuple) -> tuple | None:
+        if method == "ClipboardAdd":
+            text, png = args
+            try:
+                if self.settings.history:
+                    if text.strip():
+                        self._store().add_text(text)
+                    elif png and self.settings.history_images:
+                        data = Path(png).read_bytes()
+                        self._store().add_png(data, png_size(data))
+            finally:
+                if png:
+                    Path(png).unlink(missing_ok=True)
+        elif method == "HistoryGet":
+            item = next((i for i in self._store().items() if i.id == args[0]), None)
+            if item is None:
+                return ("", "", "")
+            return (item.kind, item.text if item.kind == "text" else "", item.image or "")
+        elif method == "HistoryPin":
+            self._store().toggle_pin(args[0])
+        elif method == "HistoryDelete":
+            self._store().delete(args[0])
+        elif method == "HistoryDone":
+            self._history_closed()
+            if args[0]:
+                # The extension has put the item on the clipboard and the list is gone: paste it
+                # once the window the list came over has the keyboard again.
+                GLib.timeout_add(60, self._paste)
+        return None
+
+    def _history_closed(self) -> bool:
+        self.engine.suspended = False
+        self.engine.reset()
+        if self._history_timer:
+            GLib.source_remove(self._history_timer)
+            self._history_timer = 0
+        return GLib.SOURCE_REMOVE
+
+    def _paste(self) -> bool:
+        self.press(e.KEY_LEFTCTRL)
+        self.tap(e.KEY_V)
+        self.release(e.KEY_LEFTCTRL)
+        return GLib.SOURCE_REMOVE
+
     def _exceptions_added(self, _words: set[str]) -> None:
         config.save_exceptions(self.engine.detector.exceptions)
 
@@ -381,11 +451,20 @@ class Daemon:
                 log.info("settings reloaded")
                 self.settings = settings
                 self.engine.configure(settings)
+                if self.store is not None:
+                    self.store.set_limit(settings.history_limit)
                 self.service.enabled_changed(settings.autoswitch)
                 if self.tray:
                     self.tray.show(settings.autoswitch)
         elif name == config.EXCEPTIONS_FILE.name:
             self.engine.detector.exceptions = config.load_exceptions()
+
+
+def png_size(data: bytes) -> str:
+    """'1920×1080' from a PNG's header, '' when it is not one."""
+    if data[:8] != b"\x89PNG\r\n\x1a\n" or len(data) < 24:
+        return ""
+    return f"{int.from_bytes(data[16:20], 'big')}×{int.from_bytes(data[20:24], 'big')}"
 
 
 def main() -> int:

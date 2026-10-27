@@ -27,6 +27,9 @@ jobs:
         run: python tests/linux_engine.py
       - name: Windows logic (Win32 faked)
         run: python tests/sim_autoswitch.py
+      - name: GNOME extension parses
+        # An ES module, as GNOME Shell loads it; node reads the syntax without the gi:// imports.
+        run: cp linux/gnome-extension/humantype@humantype.local/extension.js /tmp/extension.mjs && node --check /tmp/extension.mjs
 
   desktops:
     # The KDE, Hyprland, Sway backends against fake compositors; system Python for PyGObject.

@@ -289,9 +289,17 @@ def kde_index():
 from humantype.linux.desktops.kde import Kde  # noqa: E402
 from humantype.linux.shell import DaemonService  # noqa: E402
 
+history_calls = []
+
+
+def on_history(method, args):
+    history_calls.append((method, args))
+    return ("text", "привет", "") if method == "HistoryGet" else None
+
+
 calls = Calls()
 kde = Kde(*calls.args())
-service = DaemonService(kde.bus, lambda: True, lambda on: None, kde.window_changed)
+service = DaemonService(kde.bus, lambda: True, lambda on: None, kde.window_changed, on_history)
 pump(1.0, until=lambda: kde.present)
 check("kde: connected", kde.present, True)
 check("kde: layout", kde.layout(), "ru")
@@ -310,6 +318,18 @@ check("kde: window from the KWin script", (kde.wm_class, kde.app, kde.pid), ("or
 check("kde: focus callback", calls.focus >= 1, True)
 state = kde.state("ghbdtn")
 check("kde: state", (state.layout, state.app, state.text_known), ("en", "org.kde.konsole", False))
+
+# The clipboard history, as the GNOME extension calls it:
+replies = []
+for method, sig, args in (("ClipboardAdd", "(ss)", ("скопировано", "")), ("HistoryGet", "(u)", (7,)),
+                          ("HistoryPin", "(u)", (7,)), ("HistoryDone", "(u)", (7,))):
+    proc.call("org.humantype.Daemon", "/org/humantype/Daemon", "org.humantype.Daemon", method,
+              GLib.Variant(sig, args), None, Gio.DBusCallFlags.NONE, 1000, None,
+              lambda conn, res, m=method: replies.append((m, conn.call_finish(res).unpack())))
+pump(1.0, until=lambda: len(replies) == 4)
+check("history: calls reach the service", history_calls,
+      [("ClipboardAdd", ("скопировано", "")), ("HistoryGet", (7,)), ("HistoryPin", (7,)), ("HistoryDone", (7,))])
+check("history: an item comes back", dict(replies).get("HistoryGet"), ("text", "привет", ""))
 
 kde_proc.terminate()
 print(f"FAILS: {fails}")
