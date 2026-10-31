@@ -20,6 +20,14 @@ from pathlib import Path
 
 from .layout import EN_TO_RU, RU_TO_EN
 
+try:  # Russian morphology: every form of every dictionary word, not only the frequent ones
+    import pymorphy3
+    import pymorphy3_dicts_ru  # by path: entry points do not survive PyInstaller
+except ImportError:
+    pymorphy3 = None
+
+MORPH_FREQ = -1.0  # log10 per million given to a form only the morphology knows
+
 EN_LETTERS = set("abcdefghijklmnopqrstuvwxyz")
 RU_LETTERS = set("абвгдеёжзийклмнопрстуфхцчшщъыьэюя")
 LETTERS = {"en": EN_LETTERS, "ru": RU_LETTERS}
@@ -104,7 +112,7 @@ def _mixed_case(core: str) -> bool:
 
 
 class Detector:
-    def __init__(self, dict_dir: Path) -> None:
+    def __init__(self, dict_dir: Path, morphology: bool = True) -> None:
         self.freq: dict[str, dict[str, float]] = {}
         self.models: dict[str, NgramModel] = {}
         for lang in ("ru", "en"):
@@ -118,6 +126,7 @@ class Detector:
             self.freq[lang] = words
             counts = json.loads((dict_dir / f"{lang}.ngram").read_text(encoding="utf-8"))
             self.models[lang] = NgramModel(counts, LETTERS[lang])
+        self.morph = pymorphy3.MorphAnalyzer(pymorphy3_dicts_ru.get_path()) if pymorphy3 and morphology else None
         self.sensitivity = SENSITIVITY["normal"]
         self.short_words = True
         self.exceptions: set[str] = set()  # key spellings (lowercase, US layout) never to switch
@@ -144,6 +153,8 @@ class Detector:
         freq = self.freq[lang].get(key) if valid else None
         if valid and len(key) == 1 and key not in SINGLE[lang]:
             freq = None  # word lists are full of stray letters; only real one-letter words count
+        if freq is None and valid and lang == "ru" and len(key) >= 3 and self.morph and self.morph.word_is_known(key):
+            freq = MORPH_FREQ
         return Reading(
             lang=lang,
             text=text,
@@ -196,6 +207,8 @@ class Detector:
             return no("mixed case")
         if alt.core.isupper() and sum(c.isalpha() for c in alt.core) >= 2 and not alt.known:
             return no("abbreviation")  # РСФСР, NASA: only a dictionary word in capitals is a typo
+        if alt.core.isupper() and 2 <= sum(c.isalpha() for c in alt.core) <= 4 and context != other:
+            return no("abbreviation")  # МСК is not a typo of VCR, nor РГПУ of HUGE
 
         # Context moves the bar: the neighbours speaking the other language make a switch easier.
         s = self.sensitivity
@@ -228,17 +241,29 @@ class Detector:
             # The current reading has signs inside that no word of its language has (`k.,jdm`).
             if alt.known:
                 return yes("current reading is not a word")
-            # A dot inside is more often a file, a site or an abbreviation (`file.txt`, `i.e.`).
-            if "." not in cur.core and alt.ngram > self._floor(other) + 2.0:
+            # A dot inside is more often a file, a site or an abbreviation (`file.txt`, `i.e.`),
+            # but `ю` sits on that key too (`dntrf.oe.` = «втекающую»).
+            if not self._dotted(cur) and alt.ngram > self._floor(other) + 2.0:
                 return yes("current reading is not a word, letters fit")
             return no("neither reading is a word")
 
         if alt.known and cur.known:
             if alt.freq - cur.freq >= s.both_known_gap and cur.freq <= s.both_known_max_current:
                 return yes("other word is far more common")
+            # The current word is only a piece of what was typed: its edge signs are letters of the
+            # other word (`'ne` = «эту», `to\`` = «ещё», `{el` = «худ»).
+            # A dot or a comma at the edge is punctuation far more often than «ю» or «б» (`it.`).
+            edges = cur.prefix + cur.suffix
+            if letters > sum(c.isalpha() for c in cur.core) and alt.freq >= s.short_min_freq and not (
+                cur.prefix and cur.suffix
+            ) and not set(edges) & set(".,"):
+                return yes("current word is cut from the other")
             return no("both are words")
         if alt.known:
-            if alt.freq >= s.known_min_freq or alt.ngram - cur.ngram >= s.known_ngram_gap:
+            # A rare word still wins over letters that do not look like the current language at all.
+            if alt.freq >= s.known_min_freq or alt.ngram - cur.ngram >= s.known_ngram_gap or (
+                letters >= 4 and cur.ngram < self._floor(current)
+            ):
                 return yes("other reading is a known word")
             return no("other reading is a rare word")
         if cur.known:
@@ -246,6 +271,13 @@ class Detector:
         if letters >= s.unknown_min_len and alt.ngram - cur.ngram >= s.unknown_ngram_gap and alt.ngram > self._floor(other):
             return yes("letters fit the other language")
         return no("unsure")
+
+    def _dotted(self, r: Reading) -> bool:
+        """Reads as dotted English (`file.txt`, `github.io`, `i.e`): every part is a word or short."""
+        if r.lang != "en" or "." not in r.core:
+            return False
+        parts = r.core.lower().split(".")
+        return all(p and (len(p) <= 4 or p in self.freq["en"]) for p in parts)
 
     def _floor(self, lang: str) -> float:
         """A trigram score below which a sequence does not look like the language at all."""

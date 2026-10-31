@@ -1,7 +1,7 @@
 # PyInstaller build: one folder with HumanType.exe (starts faster and trips antiviruses less than one file).
 # Run through build.bat, or: .venv\Scripts\python -m PyInstaller --noconfirm --clean HumanType.spec
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 import comtypes.client
 
 # UI Automation's COM wrappers are generated on first use; make them now so they go into the build.
@@ -15,8 +15,9 @@ a = Analysis(
         ("assets/icon.png", "assets"),
         ("assets/app.svg", "assets"),
         ("assets/tray.svg", "assets"),
+        *collect_data_files("pymorphy3_dicts_ru"),  # Russian morphology for the detector
     ],
-    hiddenimports=["pythoncom", "pywintypes", *collect_submodules("comtypes.gen")],
+    hiddenimports=["pythoncom", "pywintypes", *collect_submodules("comtypes.gen"), *collect_submodules("pymorphy3")],
     excludes=[
         "tkinter", "unittest", "pydoc", "PIL",
         "PySide6.QtNetwork", "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtWebEngineCore",

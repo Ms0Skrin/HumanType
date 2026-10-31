@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pip install evdev pyside6
+      - run: pip install evdev pyside6 pymorphy3
       - name: Linux engine
         run: python tests/linux_engine.py
       - name: Windows logic (Win32 faked)
@@ -48,7 +48,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Dependencies
-        run: pip install pyside6 pywin32 comtypes pyinstaller
+        run: pip install pyside6 pywin32 comtypes pyinstaller pymorphy3
       - name: Version
         id: ver
         shell: bash

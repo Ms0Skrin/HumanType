@@ -90,6 +90,16 @@ case "$KIND" in
         exit 1 ;;
 esac
 
+echo "== Russian morphology (optional: every word form for the detector)"
+if PYTHONPATH="$APP_DIR/vendor" python3 -c 'import pymorphy3, pymorphy3_dicts_ru' 2>/dev/null; then
+    echo "already there"
+elif python3 -m pip install -q --upgrade --target "$APP_DIR/vendor" pymorphy3; then
+    echo "installed into $APP_DIR/vendor"
+else
+    echo "  skipped: no pip. Install it and run install.sh again for better word detection:"
+    echo "  Arch: sudo pacman -S python-pip   Fedora: sudo dnf install python3-pip   Ubuntu: sudo apt install python3-pip"
+fi
+
 echo "== udev rule (sudo)"
 if ! cmp -s "$APP_DIR/linux/70-humantype.rules" "$RULE" 2>/dev/null; then
     sudo install -m 644 "$APP_DIR/linux/70-humantype.rules" "$RULE"
