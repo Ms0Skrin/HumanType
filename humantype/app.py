@@ -3,15 +3,20 @@
 import ctypes
 import logging
 import os
+import subprocess
 import sys
+import threading
+import webbrowser
 
 import win32api
 import win32event
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QSystemTrayIcon, QVBoxLayout, QWidget, QWidgetAction
+from PySide6.QtWidgets import (
+    QApplication, QHBoxLayout, QLabel, QMenu, QMessageBox, QSystemTrayIcon, QVBoxLayout, QWidget, QWidgetAction,
+)
 
-from . import theme, winapi
+from . import __version__, theme, updater, winapi
 from .autoswitch import AutoSwitcher
 from .config import EXCEPTIONS_FILE, Settings, set_autostart
 from .detector import Detector
@@ -55,9 +60,24 @@ class MenuHeader(QWidget):
         self.status.setText(f'<span style="color:{dot}">●</span>&nbsp; {text}')
 
 
+class UpdateSignals(QObject):
+    """Carries the update check and download results from their thread to the GUI thread."""
+
+    checked = Signal(object, str, bool)  # Release | None, error, quiet
+    downloaded = Signal(str, str)  # installer path, error
+    progress = Signal(float)
+
+
 class HumanTypeApp:
     def __init__(self, app: QApplication) -> None:
         self.app = app
+        self.update: updater.Release | None = None
+        self.updating = False
+        self.update_signals = UpdateSignals()
+        self.update_signals.checked.connect(self._on_update_checked)
+        self.update_signals.downloaded.connect(self._on_update_downloaded)
+        self.update_signals.progress.connect(
+            lambda part: self.update_action.setText(f"Скачиваю {self.update.version}… {part:.0%}"))
         self.settings = Settings.load()
         self.toast = Toast()
         self.history = History(DATA_DIR / "history.db", IMAGES_DIR)
@@ -97,6 +117,7 @@ class HumanTypeApp:
                 app_icon(),
                 4000,
             )
+        QTimer.singleShot(20_000, lambda: self.check_updates(quiet=True))
 
     def notify(self, text: str) -> None:
         if self.settings.show_toasts:
@@ -191,6 +212,7 @@ class HumanTypeApp:
         menu.addAction(line_icon("folder"), "Папка с данными", lambda: os.startfile(DATA_DIR))
         menu.addSeparator()
         menu.addAction(line_icon("settings"), "Настройки", self.open_settings)
+        self.update_action = menu.addAction(line_icon("download"), "Проверить обновления", self._update_clicked)
         menu.addAction(line_icon("power"), "Выход", self.quit)
 
         menu.aboutToShow.connect(self._update_header)
@@ -261,6 +283,84 @@ class HumanTypeApp:
         self.pause_action.setText("Снова запоминать буфер" if paused else "Не запоминать буфер")
         self.pause_action.setIcon(line_icon("play", theme.ACCENT) if paused else line_icon("pause"))
         self.toast.show_text("Буфер не запоминается" if paused else "Буфер снова запоминается")
+
+    # --- updates ---
+
+    def _update_clicked(self) -> None:
+        if self.update:
+            self.install_update()
+        else:
+            self.check_updates(quiet=False)
+
+    def check_updates(self, quiet: bool) -> None:
+        if self.updating:
+            return
+        self.update_action.setText("Проверяю обновления…")
+
+        def work() -> None:
+            try:
+                self.update_signals.checked.emit(updater.newer(), "", quiet)
+            except Exception as error:
+                log.warning("update check: %s", error)
+                self.update_signals.checked.emit(None, str(error), quiet)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_checked(self, release: updater.Release | None, error: str, quiet: bool) -> None:
+        self.update = release
+        if release:
+            self.update_action.setText(f"Обновить до {release.version}")
+            self.update_action.setIcon(line_icon("download", theme.ACCENT))
+            if quiet:
+                self.tray.showMessage(APP_NAME, f"Вышла версия {release.version}. Обновить: меню → «Обновить до {release.version}»",
+                                      app_icon(), 6000)
+                return
+            answer = QMessageBox.question(
+                None, APP_NAME,
+                f"Вышла версия {release.version} (у тебя {__version__}).\n\n{release.notes[:600]}\n\nОбновить сейчас?",
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.install_update()
+            return
+        self.update_action.setText("Проверить обновления")
+        if not quiet:
+            if error:
+                self.tray.showMessage(APP_NAME, f"Не удалось проверить обновления: {error}",
+                                      QSystemTrayIcon.MessageIcon.Warning)
+            else:
+                self.tray.showMessage(APP_NAME, f"Установлена последняя версия ({__version__})", app_icon(), 3000)
+
+    def install_update(self) -> None:
+        release = self.update
+        if not release or self.updating:
+            return
+        if not getattr(sys, "frozen", False):
+            webbrowser.open(updater.PAGE)  # running from source: nothing to install over
+            return
+        self.updating = True
+        self.update_action.setText(f"Скачиваю {release.version}…")
+
+        def work() -> None:
+            try:
+                path = updater.download_installer(release, self.update_signals.progress.emit)
+                self.update_signals.downloaded.emit(str(path), "")
+            except Exception as error:
+                log.warning("update download: %s", error)
+                self.update_signals.downloaded.emit("", str(error))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_downloaded(self, path: str, error: str) -> None:
+        if error:
+            self.updating = False
+            self.update_action.setText(f"Обновить до {self.update.version}")
+            self.tray.showMessage(APP_NAME, f"Не удалось скачать обновление: {error}", QSystemTrayIcon.MessageIcon.Warning)
+            return
+        # The setup waits until we have quit (it checks our mutex), installs and starts the new version.
+        command = f'ping -n 3 127.0.0.1 >nul & start "" "{path}" /SILENT /SUPPRESSMSGBOXES /NORESTART'
+        subprocess.Popen(["cmd", "/c", command], creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS)
+        log.info("updating to %s", self.update.version)
+        self.quit()
 
     def quit(self) -> None:
         self.autoswitcher.stop()

@@ -9,3 +9,8 @@ Terminal=false
 Categories=Utility;
 Keywords=keyboard;layout;раскладка;punto;
 StartupNotify=false
+Actions=update;
+
+[Desktop Action update]
+Name=Проверить обновления
+Exec=env PYTHONPATH=@APP_DIR@ /usr/bin/python3 -m humantype.linux.ctl update

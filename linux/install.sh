@@ -101,7 +101,12 @@ else
 fi
 
 echo "== udev rule (sudo)"
-if ! cmp -s "$APP_DIR/linux/70-humantype.rules" "$RULE" 2>/dev/null; then
+if cmp -s "$APP_DIR/linux/70-humantype.rules" "$RULE" 2>/dev/null; then
+    :
+elif [[ ! -t 0 ]] && ! sudo -n true 2>/dev/null; then
+    # Updating from the menu: no terminal to ask for a password in.
+    echo "  skipped: the rule changed, run linux/install.sh in a terminal once"
+else
     sudo install -m 644 "$APP_DIR/linux/70-humantype.rules" "$RULE"
     sudo udevadm control --reload
     sudo udevadm trigger --subsystem-match=input --subsystem-match=misc
@@ -121,7 +126,7 @@ echo "== app menu entry and icons"
 mkdir -p "$(dirname "$DESKTOP")" "$ICONS"
 install -m 644 "$APP_DIR/assets/app.svg" "$ICONS/humantype.svg"
 install -m 644 "$APP_DIR/assets/app-off.svg" "$ICONS/humantype-off.svg"
-sed "s|@APP_DIR@|$APP_DIR|" "$APP_DIR/linux/humantype.desktop" > "$DESKTOP"
+sed "s|@APP_DIR@|$APP_DIR|g" "$APP_DIR/linux/humantype.desktop" > "$DESKTOP"
 gtk-update-icon-cache -q -t "$DATA/icons/hicolor" 2>/dev/null || true
 
 if [[ "${1:-}" == "--no-service" ]]; then
@@ -131,7 +136,7 @@ fi
 
 echo "== user service"
 mkdir -p "$UNIT_DIR"
-sed "s|@APP_DIR@|$APP_DIR|" "$APP_DIR/linux/humantype.service" > "$UNIT_DIR/humantype.service"
+sed "s|@APP_DIR@|$APP_DIR|g" "$APP_DIR/linux/humantype.service" > "$UNIT_DIR/humantype.service"
 systemctl --user daemon-reload
 systemctl --user enable humantype.service
 if [[ "$KIND" != gnome ]]; then

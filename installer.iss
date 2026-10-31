@@ -47,6 +47,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\HumanType.exe"; Description: "Запустить HumanType"; Flags: nowait postinstall skipifsilent
+; An update from the app's menu installs silently: start the new version right after.
+Filename: "{app}\HumanType.exe"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM HumanType.exe /F"; Flags: runhidden; RunOnceId: "KillApp"
