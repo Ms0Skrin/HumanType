@@ -6,17 +6,19 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 
 import win32api
 import win32event
+import win32security
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QMenu, QMessageBox, QSystemTrayIcon, QVBoxLayout, QWidget, QWidgetAction,
 )
 
-from . import __version__, theme, updater, winapi
+from . import __version__, elevation, theme, updater, winapi
 from .autoswitch import AutoSwitcher
 from .config import EXCEPTIONS_FILE, Settings, set_autostart
 from .detector import Detector
@@ -30,6 +32,9 @@ from .settings_window import SettingsWindow, hotkey_text
 from .toast import Toast
 
 ERROR_ALREADY_EXISTS = 183
+ERROR_ACCESS_DENIED = 5
+MUTEX_NAME = "Local\\HumanTypeTrayApp"
+SYNCHRONIZE = 0x00100000
 
 log = logging.getLogger("humantype")
 
@@ -69,7 +74,7 @@ class UpdateSignals(QObject):
 
 
 class HumanTypeApp:
-    def __init__(self, app: QApplication) -> None:
+    def __init__(self, app: QApplication, elevation_refused: bool = False) -> None:
         self.app = app
         self.update: updater.Release | None = None
         self.updating = False
@@ -100,9 +105,20 @@ class HumanTypeApp:
         self.tray.activated.connect(self._on_tray)
         self.tray.show()
 
+        if elevation_refused:
+            self.settings.run_as_admin = False  # asked once; not again at every start
+            self.settings.save()
         failed = self.apply_settings(self.settings, save=False)
         s = self.settings
-        if failed:
+        if elevation_refused:
+            self.tray.showMessage(
+                APP_NAME,
+                "Без прав администратора HumanType не видит набор в окнах, запущенных от администратора "
+                "(терминал, cmd).\nВключить: Настройки → Поведение → «Работать в окнах администратора».",
+                QSystemTrayIcon.MessageIcon.Warning,
+                8000,
+            )
+        elif failed:
             self.tray.showMessage(
                 APP_NAME,
                 "Заняты другой программой: " + ", ".join(failed) + "\nПоменяй их в настройках.",
@@ -160,9 +176,16 @@ class HumanTypeApp:
         )
         self._update_autoswitch_action()
         try:
-            set_autostart(settings.autostart)
+            set_autostart(settings.autostart, settings.run_as_admin)
         except OSError:
             log.exception("autostart change failed")
+        if save and settings.run_as_admin and not elevation.is_admin() and elevation.can_elevate():
+            # Switched on in the settings: start again with the rights, this copy makes way.
+            if elevation.relaunch_as_admin("--after-restart"):
+                QTimer.singleShot(0, self.quit)
+            else:
+                settings.run_as_admin = False
+                settings.save()
         s = settings
         self.tray.setToolTip(f"{APP_NAME}\n{hotkey_text(s.fix_word)} — раскладка\n{hotkey_text(s.history_popup)} — буфер")
         self.fix_action.setText(f"Исправить раскладку\t{hotkey_text(s.fix_word)}")
@@ -369,6 +392,64 @@ class HumanTypeApp:
         self.app.quit()
 
 
+def _single_instance():
+    """The mutex that marks a running copy, or None when one runs already. Anyone may open it
+    (and it carries a low integrity label): a copy without admin rights and the installer must
+    see the one that has them."""
+    attributes = win32security.SECURITY_ATTRIBUTES()
+    attributes.SECURITY_DESCRIPTOR = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
+        "D:(A;;GA;;;WD)S:(ML;;NW;;;LW)", win32security.SDDL_REVISION_1)
+    try:
+        mutex = win32event.CreateMutex(attributes, False, MUTEX_NAME)
+    except win32event.error as error:
+        if error.winerror == ERROR_ACCESS_DENIED:
+            return None  # made by a copy with other rights (an old version): it runs
+        raise
+    if win32api.GetLastError() == ERROR_ALREADY_EXISTS:
+        return None
+    return mutex
+
+
+def _running() -> bool:
+    try:
+        handle = win32event.OpenMutex(SYNCHRONIZE, False, MUTEX_NAME)
+    except win32event.error as error:
+        return error.winerror == ERROR_ACCESS_DENIED
+    win32api.CloseHandle(handle)
+    return True
+
+
+def _wait(condition, seconds: float) -> bool:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if condition():
+            return True
+        time.sleep(0.1)
+    return condition()
+
+
+def _elevate() -> str:
+    """Start the copy with admin rights instead of this one: "started", "refused" or "no"."""
+    if not elevation.can_elevate():
+        return "no"  # not an administrator: nothing to ask for
+    if elevation.task_installed() and elevation.run_task():
+        if _wait(_running, 8):
+            return "started"
+        log.warning("the admin task did not start the app, asking UAC")
+    return "started" if elevation.relaunch_as_admin("--after-restart") else "refused"
+
+
+def _cleanup() -> None:
+    """For the uninstaller: removes the admin task and stops the running copy."""
+    if not elevation.is_admin():
+        if elevation.task_installed() and elevation.can_elevate() and elevation.relaunch_as_admin("--cleanup"):
+            _wait(lambda: not elevation.task_installed(), 30)
+        return
+    elevation.remove_task()
+    subprocess.run(["taskkill", "/F", "/IM", "HumanType.exe", "/FI", f"PID ne {os.getpid()}"],
+                   capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+
 def main() -> None:
     logging.basicConfig(
         filename=LOG_FILE,
@@ -377,9 +458,26 @@ def main() -> None:
         encoding="utf-8",
     )
     sys.excepthook = lambda *exc: log.critical("unhandled", exc_info=exc)
+    # The keyboard hook must get the GIL back fast: Windows drops a hook that answers late.
+    sys.setswitchinterval(0.001)
+    args = sys.argv[1:]
+    if "--cleanup" in args:
+        _cleanup()
+        return
 
-    mutex = win32event.CreateMutex(None, False, "Local\\HumanTypeTrayApp")
-    if win32api.GetLastError() == ERROR_ALREADY_EXISTS:
+    if "--after-restart" in args:
+        _wait(lambda: not _running(), 10)  # the copy that started us is still quitting
+    elif _running():
+        return
+    refused = False
+    if not elevation.is_admin() and Settings.load().run_as_admin:
+        outcome = _elevate()
+        if outcome == "started":
+            return
+        refused = outcome == "refused"
+
+    mutex = _single_instance()
+    if mutex is None:
         return
 
     app = QApplication(sys.argv)
@@ -392,8 +490,8 @@ def main() -> None:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("HumanType.App")
     except Exception:
         pass
-    instance = HumanTypeApp(app)
-    log.info("started")
+    instance = HumanTypeApp(app, elevation_refused=refused)
+    log.info("started%s", " with admin rights" if elevation.is_admin() else " without admin rights")
     code = app.exec()
     del instance, mutex
     sys.exit(code)

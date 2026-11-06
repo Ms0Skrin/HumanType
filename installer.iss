@@ -51,6 +51,8 @@ Filename: "{app}\HumanType.exe"; Description: "Запустить HumanType"; Fl
 Filename: "{app}\HumanType.exe"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
+; The app may run with admin rights through a scheduled task: it removes the task and stops itself.
+Filename: "{app}\HumanType.exe"; Parameters: "--cleanup"; Flags: runhidden waituntilterminated; RunOnceId: "Cleanup"
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM HumanType.exe /F"; Flags: runhidden; RunOnceId: "KillApp"
 
 [UninstallDelete]

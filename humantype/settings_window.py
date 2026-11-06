@@ -393,6 +393,7 @@ class SettingsWindow(QDialog):
         self.switch_layout = Toggle(settings.switch_layout)
         self.show_toasts = Toggle(settings.show_toasts)
         self.autostart = Toggle(settings.autostart)
+        self.run_as_admin = Toggle(settings.run_as_admin)
 
         # --- pages ---
         self.stack = QStackedWidget()
@@ -429,6 +430,12 @@ class SettingsWindow(QDialog):
                 row("Переключать раскладку", "После исправления включить язык, на котором текст теперь написан", self.switch_layout),
                 row("Подсказки у курсора", "Короткие уведомления вроде «✓ РУ: привет»", self.show_toasts),
                 row("Запуск вместе с Windows", "HumanType будет в трее сразу после входа", self.autostart),
+                row(
+                    "Работать в окнах администратора",
+                    "Терминал и cmd «от имени администратора»: без этого Windows не даёт видеть там набор. "
+                    "Один раз спросит разрешение",
+                    self.run_as_admin,
+                ),
             )
         )
         self.stack.addWidget(self._about_page())
@@ -522,7 +529,7 @@ class SettingsWindow(QDialog):
         picker.lineEdit().setPlaceholderText("Выбери из запущенных или впиши, например game.exe")
         self.excluded = ListEditor(
             "Программы-исключения",
-            "Здесь автопереключение не работает. По умолчанию: терминалы, редакторы кода, менеджеры паролей, удалённые рабочие столы.",
+            "Здесь автопереключение не работает. По умолчанию: менеджеры паролей, удалённые рабочие столы и виртуальные машины.",
             settings.autoswitch_excluded,
             picker,
         )
@@ -549,7 +556,7 @@ class SettingsWindow(QDialog):
             row("Подсказка при исправлении", "Короткое уведомление у курсора: ghbdtn → привет", self.autoswitch_notify),
             row(
                 "Ответы в терминале",
-                "н, нуы, т, тщ по Enter становятся y, yes, n, no — даже там, где автопереключение выключено",
+                "н, нуы, т, тщ по Enter становятся y, yes, n, no — и в терминале из исключений",
                 self.terminal_answers,
             ),
             self.excluded,
@@ -624,6 +631,7 @@ class SettingsWindow(QDialog):
             switch_layout=self.switch_layout.isChecked(),
             show_toasts=self.show_toasts.isChecked(),
             autostart=self.autostart.isChecked(),
+            run_as_admin=self.run_as_admin.isChecked(),
             autoswitch=self.autoswitch.isChecked(),
             toggle_autoswitch=self.hk_toggle.hotkey,
             autoswitch_sensitivity=self.sensitivity.value(),
@@ -652,6 +660,7 @@ class SettingsWindow(QDialog):
         self.switch_layout.setChecked(defaults.switch_layout)
         self.show_toasts.setChecked(defaults.show_toasts)
         self.autostart.setChecked(defaults.autostart)
+        self.run_as_admin.setChecked(defaults.run_as_admin)
 
     def _save(self) -> None:
         new = self._collect()

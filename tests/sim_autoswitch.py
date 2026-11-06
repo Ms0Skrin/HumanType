@@ -112,6 +112,7 @@ A.process_name = lambda h: box.app
 A.is_fullscreen = lambda h: False
 A.win32api.PostMessage = post_message
 A.AutoSwitcher._layout = staticmethod(lambda hwnd: box.layout)
+A.AutoSwitcher._fast_layout = lambda self, hwnd: box.layout
 A.AutoSwitcher._hkl = staticmethod(lambda lang: HKL[lang])
 A.win32process.GetWindowThreadProcessId.return_value = (1, 2)
 A.user32.GetForegroundWindow.return_value = 1
@@ -227,12 +228,17 @@ check("the word after undo stays", box.s(), "ghbdtn ")
 reset("ru", app="WindowsTerminal.exe"); type_("yes\n"); check("terminal: нуы → yes", box.s(), "yes\n"); check("terminal: layout en", box.layout, "en")
 reset("ru", app="WindowsTerminal.exe"); type_("n\n"); check("terminal: т → n", box.s(), "n\n")
 reset("ru", app="cmd.exe"); type_("no\n"); check("console: тщ → no", box.s(), "no\n")
-reset("ru", app="WindowsTerminal.exe"); type_("yes "); check("terminal: not on space", box.s(), "нуы ")
-reset(app="WindowsTerminal.exe"); type_("ghbdtn "); check("terminal: no autoswitch", box.s(), "ghbdtn ")
+reset(app="WindowsTerminal.exe"); type_("ghbdtn "); check("terminal: words fixed too", box.s(), "привет ")
+reset(app="cmd.exe"); type_("ghbdtn "); check("cmd: words fixed too", box.s(), "привет ")
 reset("ru", app="notepad.exe"); type_("n\n"); check("not a terminal: т stays", box.s(), "т\n")
+sw.excluded.add("windowsterminal.exe")  # a terminal excluded by hand: only the answers are fixed there
+reset("ru", app="WindowsTerminal.exe"); type_("yes\n"); check("excluded terminal: нуы → yes", box.s(), "yes\n")
+reset("ru", app="WindowsTerminal.exe"); type_("yes "); check("excluded terminal: not on space", box.s(), "нуы ")
+reset(app="WindowsTerminal.exe"); type_("ghbdtn "); check("excluded terminal: no autoswitch", box.s(), "ghbdtn ")
 sw.terminal_answers = False
 reset("ru", app="WindowsTerminal.exe"); type_("yes\n"); check("terminal answers off", box.s(), "нуы\n")
 sw.terminal_answers = True
+sw.excluded.discard("windowsterminal.exe")
 # the fix-layout hotkey flips what the hook followed, no clipboard
 reset(); sw.enabled = False; type_("ghbdtn"); check("flip: word", sw.flip(False), True); idle()
 check("flip: text", box.s(), "привет"); check("flip: layout", box.layout, "ru")

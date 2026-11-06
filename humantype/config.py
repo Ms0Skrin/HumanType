@@ -18,24 +18,30 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "HumanType"
 VK_PAUSE = 0x13
 
-# Terminals and consoles: automatic switching is off there, but y/yes/n/no typed in Russian are fixed.
+# Terminals and consoles: words are fixed there like anywhere else, and y/yes/n/no typed in
+# Russian are fixed on Enter even when the terminal is excluded.
 TERMINAL_APPS = [
     "cmd.exe", "powershell.exe", "pwsh.exe", "WindowsTerminal.exe", "OpenConsole.exe", "conhost.exe",
     "mintty.exe", "putty.exe", "kitty.exe", "alacritty.exe", "wezterm-gui.exe",
 ]
 TERMINALS = {name.lower() for name in TERMINAL_APPS}
 
-# Programs where automatic switching stays off.
+# Programs where automatic switching stays off: typing a fix there is wrong or unsafe.
 DEFAULT_EXCLUDED = [
-    *TERMINAL_APPS,
-    # code editors and IDEs
-    "Code.exe", "Cursor.exe", "devenv.exe", "sublime_text.exe", "idea64.exe", "pycharm64.exe",
-    "webstorm64.exe", "rider64.exe", "clion64.exe", "goland64.exe", "phpstorm64.exe", "studio64.exe",
     # password managers
     "KeePass.exe", "KeePassXC.exe", "1Password.exe", "Bitwarden.exe",
-    # remote desktops and virtual machines
+    # remote desktops and virtual machines: the keys belong to another computer
     "mstsc.exe", "VirtualBoxVM.exe", "vmware.exe", "vmplayer.exe",
 ]
+
+# Excluded by default until settings version 2; dropped from saved settings once, so switching
+# works in terminals and code editors for those who never changed the list by hand.
+_OLD_DEFAULTS = {name.lower() for name in [
+    *TERMINAL_APPS,
+    "Code.exe", "Cursor.exe", "devenv.exe", "sublime_text.exe", "idea64.exe", "pycharm64.exe",
+    "webstorm64.exe", "rider64.exe", "clion64.exe", "goland64.exe", "phpstorm64.exe", "studio64.exe",
+]}
+SETTINGS_VERSION = 2
 
 
 @dataclass
@@ -58,6 +64,7 @@ class Settings:
     switch_layout: bool = True
     show_toasts: bool = True
     autostart: bool = field(default_factory=lambda: getattr(sys, "frozen", False))  # on by default once installed
+    run_as_admin: bool = True  # so admin windows (an elevated terminal) are reached too
     # automatic switching
     autoswitch: bool = True
     toggle_autoswitch: Hotkey = field(default_factory=lambda: Hotkey(MOD_ALT, VK_PAUSE))
@@ -67,6 +74,7 @@ class Settings:
     autoswitch_notify: bool = True
     autoswitch_terminal_answers: bool = True  # н, нуы, т, тщ in a terminal → y, yes, n, no on Enter
     autoswitch_excluded: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDED))
+    version: int = SETTINGS_VERSION
 
     @classmethod
     def load(cls) -> "Settings":
@@ -84,6 +92,13 @@ class Settings:
             if isinstance(getattr(settings, name), Hotkey):
                 value = Hotkey(int(value.get("mods", 0)), int(value.get("vk", 0)))
             setattr(settings, name, value)
+        if int(raw.get("version", 1)) < 2:
+            settings.autoswitch_excluded = [n for n in settings.autoswitch_excluded if n.lower() not in _OLD_DEFAULTS]
+            settings.version = SETTINGS_VERSION
+            try:
+                settings.save()
+            except OSError:
+                log.exception("settings.json could not be updated")
         return settings
 
     def save(self) -> None:
@@ -91,13 +106,13 @@ class Settings:
 
 
 def _launch_command() -> str:
-    if getattr(sys, "frozen", False):
-        return f'"{sys.executable}"'
-    pythonw = Path(sys.executable).with_name("pythonw.exe")
-    return f'"{pythonw}" "{app_dir() / "run.pyw"}"'
+    from .elevation import launch_parts
+
+    program, arguments = launch_parts()
+    return f'"{program}" {arguments}'.strip()
 
 
-def set_autostart(on: bool) -> None:
+def _set_run_key(on: bool) -> None:
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
         if on:
             winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, _launch_command())
@@ -106,3 +121,33 @@ def set_autostart(on: bool) -> None:
                 winreg.DeleteValue(key, RUN_NAME)
             except FileNotFoundError:
                 pass
+
+
+_TASK_STATE = DATA_DIR / "task.json"
+
+
+def set_autostart(on: bool, run_as_admin: bool = True) -> None:
+    """Running elevated, autostart goes through the admin task (it also starts later launches
+    elevated); otherwise through the Run key."""
+    from . import elevation
+
+    if not elevation.is_admin():
+        _set_run_key(on)
+        return
+    if not run_as_admin:
+        if elevation.task_installed():
+            elevation.remove_task()
+        _TASK_STATE.unlink(missing_ok=True)
+        _set_run_key(on)
+        return
+    want = {"command": _launch_command(), "logon": on}
+    try:
+        have = json.loads(_TASK_STATE.read_text(encoding="utf-8"))
+    except Exception:
+        have = None
+    if have != want or not elevation.task_installed():
+        if not elevation.install_task(on):
+            _set_run_key(on)  # the task failed: at least start with Windows
+            return
+        _TASK_STATE.write_text(json.dumps(want), encoding="utf-8")
+    _set_run_key(False)  # the task starts it; a Run entry would start a second, non-elevated copy

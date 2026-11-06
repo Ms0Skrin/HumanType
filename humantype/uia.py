@@ -44,6 +44,15 @@ def _client():
     return client
 
 
+def warm_up() -> None:
+    """Makes the client and asks once, so the first fix does not pay ~120 ms for it."""
+    try:
+        if _client() is not None:
+            text_before_caret(1)
+    except Exception:
+        pass
+
+
 def text_before_caret(limit: int) -> str | None:
     """Up to `limit` characters right before the caret of the focused field, or None when it does not tell."""
     client = _client()

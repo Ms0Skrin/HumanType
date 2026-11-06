@@ -28,7 +28,7 @@ import win32gui
 import win32process
 from PySide6.QtCore import QObject, Signal
 
-from . import uia
+from . import elevation, uia
 from .config import DEFAULT_EXCLUDED, TERMINALS
 from .detector import SENSITIVITY, Detector, Fix, Session
 from .layout import EN_TO_RU, LANG_EN, LANG_RU
@@ -120,6 +120,12 @@ kernel32.GetTickCount.restype = wintypes.DWORD
 user32.GetLastInputInfo.argtypes = (ctypes.POINTER(LASTINPUTINFO),)
 advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 advapi32.OpenProcessToken.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE))
+imm32 = ctypes.WinDLL("imm32")
+imm32.ImmGetDefaultIMEWnd.argtypes = (wintypes.HWND,)
+imm32.ImmGetDefaultIMEWnd.restype = wintypes.HWND
+kernel32.GetCurrentThread.restype = wintypes.HANDLE
+kernel32.SetThreadPriority.argtypes = (wintypes.HANDLE, ctypes.c_int)
+THREAD_PRIORITY_TIME_CRITICAL = 15
 oleacc = ctypes.WinDLL("oleacc")
 oleacc.AccessibleObjectFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p))
 OBJID_CLIENT = 0xFFFFFFFC
@@ -294,23 +300,41 @@ def browser_password(hwnd: int) -> bool:
         return False
 
 
+_WE_ARE_ADMIN: bool | None = None
+
+
 def is_elevated(hwnd: int) -> bool:
-    """A window of an elevated (admin) process: low-level hooks get no input meant for it."""
+    """A window of an elevated (admin) process that we, not elevated, cannot reach: low-level
+    hooks get no input meant for it and SendInput into it is blocked."""
+    global _WE_ARE_ADMIN
+    if _WE_ARE_ADMIN is None:
+        _WE_ARE_ADMIN = elevation.is_admin()
+    if _WE_ARE_ADMIN:
+        return False
     try:
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
-        handle = kernel32.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return True
-        try:
-            token = wintypes.HANDLE()
-            if not advapi32.OpenProcessToken(handle, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
-                return True
-            kernel32.CloseHandle(token)
-            return False
-        finally:
-            kernel32.CloseHandle(handle)
+        return elevation.process_elevated(pid)
     except Exception:
         return False
+
+
+def layout_thread(hwnd: int) -> int:
+    """The thread whose keyboard layout is the window's. A console window (cmd, PowerShell in
+    conhost) claims the thread of the shell, which has no layout at all; its IME window belongs
+    to the console host's thread, which has the real one."""
+    thread = user32.GetWindowThreadProcessId(hwnd, None)
+    if LANGS.get((user32.GetKeyboardLayout(thread) or 0) & 0xFFFF):
+        return thread
+    ime = imm32.ImmGetDefaultIMEWnd(hwnd)
+    if ime:
+        ime_thread = user32.GetWindowThreadProcessId(ime, None)
+        if ime_thread and LANGS.get((user32.GetKeyboardLayout(ime_thread) or 0) & 0xFFFF):
+            return ime_thread
+    return thread
+
+
+def thread_layout(thread: int) -> str | None:
+    return LANGS.get((user32.GetKeyboardLayout(thread) or 0) & 0xFFFF)
 
 
 def _idle_ms(since: int) -> int:
@@ -375,6 +399,7 @@ class AutoSwitcher(QObject):
         self._origin = "edge"
         self._down: set[int] = set()  # keys held, to tell the system's autorepeat from a new press
         self._hwnd = 0
+        self._kbd_thread = 0  # the thread whose layout is the window's (see layout_thread)
         self._window = "ok"  # "ok"; "answers": only terminal answers are fixed; "off": not followed
         self._terminal = False
         self._last: _Done | None = None
@@ -467,6 +492,8 @@ class AutoSwitcher(QObject):
 
     def _hook_thread(self) -> None:
         self._thread_id = kernel32.GetCurrentThreadId()
+        # Windows drops a hook that answers late; never let the hook wait behind other work.
+        kernel32.SetThreadPriority(kernel32.GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL)
         self._set_hooks()
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -539,6 +566,7 @@ class AutoSwitcher(QObject):
                 self._hwnd = hwnd
                 self._reset("edge")
                 self._window = self._window_kind(hwnd)
+                self._kbd_thread = layout_thread(hwnd)
             if self._window == "off":
                 self._reset()
                 return False
@@ -552,7 +580,7 @@ class AutoSwitcher(QObject):
                 return False
             if vk == VK_BACK:
                 return self._backspace(hwnd)
-            layout = self._layout(hwnd)
+            layout = self._fast_layout(hwnd)
             if layout is None:
                 self._reset()
                 return False
@@ -705,16 +733,24 @@ class AutoSwitcher(QObject):
             return "answers" if self._terminal and self.terminal_answers else "off"
         return "off" if self.skip_fullscreen and is_fullscreen(hwnd) else "ok"
 
+    def _fast_layout(self, hwnd: int) -> str | None:
+        """The window's layout through the thread found when it got the focus: one call, cheap
+        enough for every key."""
+        layout = thread_layout(self._kbd_thread)
+        if layout is None:
+            self._kbd_thread = layout_thread(hwnd)  # a console may get its host thread late
+            layout = thread_layout(self._kbd_thread)
+        return layout
+
     @staticmethod
     def _layout(hwnd: int) -> str | None:
-        thread = user32.GetWindowThreadProcessId(hwnd, None)
-        hkl = user32.GetKeyboardLayout(thread) or 0
-        return LANGS.get(hkl & 0xFFFF)
+        return thread_layout(layout_thread(hwnd))
 
     # --- the worker: types fixes outside the hook ---
 
     def _worker(self) -> None:
         pythoncom.CoInitialize()  # for asking browsers about password fields
+        uia.warm_up()  # COM objects belong to this thread: make them here, before the first fix
         while True:
             job = self._jobs.get()
             if job is None:
@@ -824,14 +860,35 @@ class AutoSwitcher(QObject):
 
     def _switch(self, hwnd: int, lang: str) -> None:
         """Asks the window for another layout and waits until it takes it, so that the keys held
-        meanwhile are replayed in the new layout, not the old one."""
+        meanwhile are replayed in the new layout, not the old one. A window that ignores the
+        request is asked again through its focused control and its IME window."""
         hkl = self._hkl(lang)
         if not hkl:
+            log.warning("no %s layout installed", lang)
             return
-        win32api.PostMessage(hwnd, WM_INPUTLANGCHANGEREQUEST, 0, hkl)
-        end = time.monotonic() + 0.2
-        while self._layout(hwnd) != lang and time.monotonic() < end:
-            time.sleep(0.005)
+        targets = [hwnd]
+        try:
+            thread, _ = win32process.GetWindowThreadProcessId(hwnd)
+            info = win32gui.GetGUIThreadInfo(thread)
+            focus = info["hwndFocus"] if isinstance(info, dict) else info[2]
+            if focus and focus != hwnd:
+                targets.append(focus)
+        except Exception:
+            pass
+        ime = imm32.ImmGetDefaultIMEWnd(hwnd)
+        if ime:
+            targets.append(ime)
+        for attempt, target in enumerate(targets):
+            try:
+                win32api.PostMessage(target, WM_INPUTLANGCHANGEREQUEST, 0, hkl)
+            except Exception:
+                continue
+            end = time.monotonic() + (0.12 if attempt < len(targets) - 1 else 0.25)
+            while time.monotonic() < end:
+                if self._layout(hwnd) == lang:
+                    return
+                time.sleep(0.002)
+        log.warning("the window did not switch to %s (%s)", lang, process_name(hwnd))
 
     def _take_held_backspace(self) -> bool:
         with self._lock:
@@ -855,7 +912,7 @@ class AutoSwitcher(QObject):
                 inputs += [_key(vk), _key(vk, up=True)]
             with self._lock:
                 # Replayed keys carry MARKER and skip the hook: keep the line in step here.
-                layout = self._layout(self._hwnd)
+                layout = self._fast_layout(self._hwnd)
                 if vk == VK_BACK:
                     if self._line:
                         if self._line.pop().vk == VK_SPACE:
