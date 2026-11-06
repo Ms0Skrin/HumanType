@@ -121,7 +121,7 @@ A.user32.GetKeyState.return_value = 0
 detector = Detector(ROOT / "assets" / "dict")
 tmp = Path(tempfile.mkdtemp()) / "exc.txt"
 tmp.unlink(missing_ok=True)
-sw = A.AutoSwitcher(detector, tmp)
+sw = A.AutoSwitcher(detector, tmp, tmp.with_name("learned.txt"))
 threading.Thread(target=sw._worker, daemon=True).start()
 
 
@@ -169,6 +169,7 @@ def reset(layout="en", slow=0.0, switch_delay=0.0, app="notepad.exe"):
     sw.reset()
     sw._hwnd = 0  # the next key comes to a new window: a word starts there
     sw.detector.exceptions = set()
+    sw.detector.soft_exceptions = set()
 
 
 fails = 0
@@ -186,7 +187,11 @@ reset(); type_("z nt,z k.,k. "); check("short words", box.s(), "я тебя лю
 reset("ru"); type_("hello world "); check("ru->en", box.s(), "hello world ")
 reset(); type_("hello world "); check("correct en untouched", box.s(), "hello world ")
 reset(); type_("ghbdtn \b"); check("undo after fix", box.s(), "ghbdtn"); check("undo layout back", box.layout, "en")
-check("undo saved exception", tmp.read_text(), "ghbdtn")
+check("first undo: not for good", tmp.exists() and tmp.read_text() == "ghbdtn", False)
+type_(" ghbdtn "); check("first undo: left alone until restart", box.s(), "ghbdtn ghbdtn ")
+reset(); sw.detector.soft_exceptions = set()  # the app restarted
+type_("ghbdtn "); check("after restart: fixed again", box.s(), "привет ")
+type_("\b"); check("second undo saved exception", tmp.read_text(), "ghbdtn")
 type_(" ghbdtn "); check("exception respected", box.s(), "ghbdtn ghbdtn ")
 reset(); type_("ghbdtn\n"); check("Enter fixes", box.s(), "привет\n"); check("no undo after Enter", sw._last, None)
 reset(); type_("ghbdtn\t"); check("Tab fixes", box.s(), "привет\t")
@@ -262,6 +267,25 @@ reset(); sw.enabled = False; type_("ghbdtn"); field["says"] = "other"; sw.flip(F
 check("field: flip leaves other text alone", box.s(), "ghbdtn"); check("field: flip forgets the line", sw._line, [])
 sw.enabled = True
 field["says"] = None
+# terminal commands typed in Russian: on Enter alone, on space as the first word
+reset("ru", app="WindowsTerminal.exe"); type_("ls\n"); check("command: ды → ls", box.s(), "ls\n")
+reset("ru", app="cmd.exe"); type_("cls\n"); check("command: сды → cls", box.s(), "cls\n")
+reset("ru", app="WindowsTerminal.exe"); type_("git status\n"); check("command: пше ыефегы → git status", box.s(), "git status\n")
+check("command: layout en", box.layout, "en")
+reset("ru", app="WindowsTerminal.exe"); type_("git "); type_("\b"); check("command: Backspace undoes", box.s(), "пше")
+# a word flipped by hand is learned and switched by itself after
+reset(); sw.enabled = True; type_("qwzx"); check("learn: unknown word left", box.s(), "qwzx")
+sw.flip(False); idle(); check("learn: flipped", box.s(), "йцяч")
+check("learn: remembered", sw.detector.learned.get("qwzx"), "ru")
+check("learn: saved", "qwzx ru" in sw.learned_file.read_text(encoding="utf-8").splitlines(), True)
+reset(); type_("qwzx "); check("learn: now switched by itself", box.s(), "йцяч ")
+type_("\b"); check("learn: Backspace unlearns", sw.detector.learned.get("qwzx"), None)
+# the journal tells why a word stayed
+reset(); sw.journal.clear(); type_("rjvgm.nth "); type_("ckjdj "); type_("table ")
+notes = list(sw.journal)
+check("journal: has entries", len(notes) >= 2, True)
+check("journal: a fix is marked", any(n.fixed for n in notes), True)
+check("journal: a kept word says why", any((not n.fixed) and n.why for n in notes), True)
 # watchdog maths
 A.user32.GetLastInputInfo.side_effect = lambda p: (setattr(p._obj, "dwTime", 10_000), 1)[1]
 check("idle: input after hook", A._idle_ms(5_000), 5_000)

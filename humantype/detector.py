@@ -130,6 +130,12 @@ class Detector:
         self.sensitivity = SENSITIVITY["normal"]
         self.short_words = True
         self.exceptions: set[str] = set()  # key spellings (lowercase, US layout) never to switch
+        self.soft_exceptions: set[str] = set()  # undone once: left alone until the app restarts
+        self.learned: dict[str, str] = {}  # key spellings the person flipped by hand -> the language they want
+
+    def is_exception(self, keys: str) -> bool:
+        keys = keys.lower()
+        return keys in self.exceptions or keys in self.soft_exceptions
 
     # --- readings ---
 
@@ -195,8 +201,10 @@ class Detector:
         def yes(reason: str) -> Decision:
             return Decision(True, other, alt.text, reason, cur, alt, False, True)
 
-        if keys.lower() in self.exceptions:
+        if self.is_exception(keys):
             return no("exception")
+        if self.learned.get(keys.lower()) == other and alt.valid:
+            return yes("learned")
         if any(c.isdigit() for c in keys):
             return no("digits")
         if "://" in keys or keys.lower().startswith("www"):
@@ -317,6 +325,7 @@ class Session:
     detector: Detector
     context: str | None = None
     undecided: list[_Undecided] = field(default_factory=list)
+    last: Decision | None = None  # the decision on the word just finished, for the journal
 
     def reset(self) -> None:
         self.context = None
@@ -333,11 +342,12 @@ class Session:
     def word(self, keys: str, layout: str, delimiter: str = " ") -> Fix | None:
         """Called when a word is finished, before its delimiter reaches the window."""
         d = self.detector.decide(keys, layout, self.context)
+        self.last = d
         if d.switch:
             original, text, fixed_keys = d.current.text, d.text, [keys]
             # Walk back over the words still waiting, nearest first, while they agree.
             for waiting in reversed(self.undecided):
-                if waiting.keys.lower() in self.detector.exceptions or not self._can_follow(waiting.decision, d.target):
+                if self.detector.is_exception(waiting.keys) or not self._can_follow(waiting.decision, d.target):
                     break
                 original = waiting.decision.current.text + waiting.delimiter + original
                 text = waiting.decision.other.text + waiting.delimiter + text

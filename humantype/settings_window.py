@@ -348,6 +348,15 @@ class ListEditor(QFrame):
 # --- the window ---
 
 
+def _learned_text(item: str) -> str:
+    parts = item.split()
+    if len(parts) != 2:
+        return item
+    keys, lang = parts
+    word = keys.translate(EN_TO_RU) if lang == "ru" else keys
+    return f"{word}   ·   набирается как {keys if lang == 'ru' else keys.translate(EN_TO_RU)}"
+
+
 class SettingsWindow(QDialog):
     SECTIONS = [
         ("keyboard", "Горячие клавиши"),
@@ -533,6 +542,13 @@ class SettingsWindow(QDialog):
             settings.autoswitch_excluded,
             picker,
         )
+        learned = self.autoswitcher.detector.learned if self.autoswitcher else {}
+        self.learned_words = ListEditor(
+            "Выученные слова",
+            "Слова, которые вы исправили клавишей Pause: теперь они исправляются сами. Удалите лишнее.",
+            [f"{keys} {lang}" for keys, lang in sorted(learned.items())],
+            display=lambda item: _learned_text(item),
+        )
         words = sorted(self.autoswitcher.detector.exceptions) if self.autoswitcher else []
         self._initial_words = set(words)
         self.exception_words = ListEditor(
@@ -556,10 +572,11 @@ class SettingsWindow(QDialog):
             row("Подсказка при исправлении", "Короткое уведомление у курсора: ghbdtn → привет", self.autoswitch_notify),
             row(
                 "Ответы в терминале",
-                "н, нуы, т, тщ по Enter становятся y, yes, n, no — и в терминале из исключений",
+                "н, нуы, т, тщ по Enter становятся y, yes, n, no; команды в начале строки — тоже: ды → ls, пше → git",
                 self.terminal_answers,
             ),
             self.excluded,
+            self.learned_words,
             self.exception_words,
         )
 
@@ -674,6 +691,13 @@ class SettingsWindow(QDialog):
             words = {w.lower() for w in self.exception_words.items()}
             self.autoswitcher.update_exceptions(words - self._initial_words, self._initial_words - words)
             self._initial_words = words
+            learned = {}
+            for item in self.learned_words.items():
+                parts = item.split()
+                if len(parts) == 2 and parts[1] in ("ru", "en"):
+                    learned[parts[0].lower()] = parts[1]
+            if learned != self.autoswitcher.detector.learned:
+                self.autoswitcher.set_learned(learned)
         failed = self.apply(new)
         if failed:
             self.suspend()  # keep the hotkeys free while the window is still open

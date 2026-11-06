@@ -51,3 +51,26 @@ i will be there in about ten minutes
 could you explain how this function works
 download the installer and run it as administrator
 the password should be at least twelve characters long
+слушай скинь пожалуйста конфиг от сервера
+я закоммитил фикс и запушил в мейн ветку
+у меня опять лагает комп после обновления винды
+надо переустановить драйвера на видеокарту
+го сегодня вечером в доту или в кс
+сорри не могу щас занят перезвоню позже
+спасибо большое очень выручил
+напомни завтра про встречу в десять утра
+где лежит файл с настройками программы
+открой терминал и запусти сборку проекта
+сколько стоит подписка на месяц
+ну вообще то я так и думал
+всё работает только медленно грузится
+давай созвонимся в дискорде через час
+поставь последнюю версию и перезагрузи компьютер
+please send me the latest build when it is ready
+the meeting was moved to friday afternoon
+can you check why the tests are failing again
+i will push the fix to the main branch tonight
+let me know if you need anything else from me
+thanks a lot for your help yesterday
+how much memory does this server have
+we should update the dependencies before release

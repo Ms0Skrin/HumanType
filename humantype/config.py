@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 
 SETTINGS_FILE = DATA_DIR / "settings.json"
 EXCEPTIONS_FILE = DATA_DIR / "autoswitch_exceptions.txt"
+LEARNED_FILE = DATA_DIR / "autoswitch_learned.txt"  # words flipped by hand: switched by themselves
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "HumanType"
 VK_PAUSE = 0x13
@@ -25,6 +26,17 @@ TERMINAL_APPS = [
     "mintty.exe", "putty.exe", "kitty.exe", "alacritty.exe", "wezterm-gui.exe",
 ]
 TERMINALS = {name.lower() for name in TERMINAL_APPS}
+
+# Commands typed in the Russian layout at the start of a terminal line are fixed: ды → ls, пше → git.
+# Left out: those whose Russian reading is a word someone may well type there (uv = «гм», ps = «зы»).
+TERMINAL_COMMANDS = """
+ls cd git dir cls cat npm npx pip pip3 ssh exit clear code python python3 py node docker kubectl cargo go make
+sudo vim nvim nano claude winget choco scoop wsl ping ipconfig tasklist taskkill echo mkdir rm rmdir cp mv touch
+grep curl wget yarn pnpm poetry pytest gh pwd whoami tree start explorer notepad cmake rustc rustup dotnet java
+javac mvn gradle php composer ruby gem bundle deno bun terraform helm ansible systemctl journalctl apt pacman dnf
+yay paru brew top htop btop du kill man less head tail chmod chown tar zip unzip scp rsync history alias export
+setx where which sfc dism shutdown netstat nslookup tracert powershell pwsh bash zsh fish tmux ollama ffmpeg
+""".split()
 
 # Programs where automatic switching stays off: typing a fix there is wrong or unsafe.
 DEFAULT_EXCLUDED = [

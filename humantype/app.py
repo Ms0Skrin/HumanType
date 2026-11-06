@@ -20,12 +20,13 @@ from PySide6.QtWidgets import (
 
 from . import __version__, elevation, theme, updater, winapi
 from .autoswitch import AutoSwitcher
-from .config import EXCEPTIONS_FILE, Settings, set_autostart
+from .config import EXCEPTIONS_FILE, LEARNED_FILE, Settings, set_autostart
 from .detector import Detector
 from .fixer import LayoutFixer
 from .history import History
 from .hotkeys import Hotkeys
 from .icons import app_icon, line_icon, tray_icon
+from .journal_window import JournalWindow
 from .paths import APP_NAME, ASSETS_DIR, DATA_DIR, IMAGES_DIR, LOG_FILE
 from .popup import ClipPopup, corner_at
 from .settings_window import SettingsWindow, hotkey_text
@@ -89,7 +90,8 @@ class HumanTypeApp:
         self.fixer = LayoutFixer(self.history, self.notify)
         self.popup = ClipPopup(self.history, self.notify)
         self.settings_window: SettingsWindow | None = None
-        self.autoswitcher = AutoSwitcher(Detector(ASSETS_DIR / "dict"), EXCEPTIONS_FILE)
+        self.journal_window: JournalWindow | None = None
+        self.autoswitcher = AutoSwitcher(Detector(ASSETS_DIR / "dict"), EXCEPTIONS_FILE, LEARNED_FILE)
         self.autoswitcher.corrected.connect(self._on_corrected)
         self.autoswitcher.undone.connect(self._on_undone)
         self.autoswitcher.flipped.connect(self._on_flipped)
@@ -208,6 +210,14 @@ class HumanTypeApp:
         window.raise_()
         window.activateWindow()
 
+    def open_journal(self) -> None:
+        if self.journal_window is None:
+            self.journal_window = JournalWindow(self.autoswitcher)
+        self.journal_window.refresh()
+        self.journal_window.show()
+        self.journal_window.raise_()
+        self.journal_window.activateWindow()
+
     # --- tray ---
 
     def _menu(self) -> QMenu:
@@ -224,6 +234,7 @@ class HumanTypeApp:
         menu.addSeparator()
 
         self.autoswitch_action = menu.addAction(line_icon("swap", theme.ACCENT), "Автопереключение", self.toggle_autoswitch)
+        menu.addAction(line_icon("info"), "Почему не исправилось?", self.open_journal)
         menu.addSeparator()
         self.fix_action = menu.addAction(line_icon("keyboard", theme.ACCENT), "Исправить раскладку", self.fix_word)
         self.history_action = menu.addAction(
@@ -282,8 +293,11 @@ class HumanTypeApp:
     def _on_flipped(self, text: str, lang: str) -> None:
         self.notify(f"✓ {'РУ' if lang == 'ru' else 'EN'}: {text.strip()[:40]}")
 
-    def _on_undone(self, word: str) -> None:
-        self.toast.show_text(f"Оставил «{word}» как есть и запомнил", 1600)
+    def _on_undone(self, word: str, for_good: bool) -> None:
+        if for_good:
+            self.toast.show_text(f"Оставил «{word}» как есть и запомнил", 1600)
+        else:
+            self.toast.show_text(f"Оставил «{word}» как есть", 1300)
 
     def open_history(self) -> None:
         self.popup.open_at_cursor(winapi.foreground())

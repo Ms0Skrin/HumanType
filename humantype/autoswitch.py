@@ -17,6 +17,7 @@ import queue
 import threading
 import time
 import uuid
+from collections import deque
 from ctypes import wintypes
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -29,7 +30,7 @@ import win32process
 from PySide6.QtCore import QObject, Signal
 
 from . import elevation, uia
-from .config import DEFAULT_EXCLUDED, TERMINALS
+from .config import DEFAULT_EXCLUDED, TERMINAL_COMMANDS, TERMINALS
 from .detector import SENSITIVITY, Detector, Fix, Session
 from .layout import EN_TO_RU, LANG_EN, LANG_RU
 
@@ -162,6 +163,25 @@ MAX_LINE = 300
 # A terminal asking [y/N]: these answers typed in the Russian layout (н, нуы, т, тщ) are fixed on Enter.
 ANSWERS = {"y", "yes", "n", "no"}
 WORD_EDGE = set(" \t\n([{<«\"'„“/")  # what may stand right before a word begins
+COMMANDS = {name.lower() for name in TERMINAL_COMMANDS}
+
+# Why a word was left as typed, for the journal ("Почему не исправилось?").
+REASONS = {
+    "exception": "в словах-исключениях (его исправление когда-то отменили)",
+    "digits": "в слове есть цифры",
+    "address": "похоже на адрес сайта",
+    "other reading is not a word": "в другой раскладке это не слово",
+    "mixed case": "смешанный регистр (iPhone, GitHub)",
+    "abbreviation": "похоже на аббревиатуру",
+    "short words off": "короткие слова выключены в настройках",
+    "short word, unsure": "короткое слово, в другой раскладке редкое",
+    "short word, waiting for context": "короткое слово: решится по следующему",
+    "neither reading is a word": "ни в одной раскладке не слово",
+    "both are words": "слово есть в обеих раскладках",
+    "other reading is a rare word": "в другой раскладке слишком редкое слово",
+    "current reading is a known word": "в этой раскладке это настоящее слово",
+    "unsure": "не уверен: буквы похожи на оба языка",
+}
 
 
 @dataclass(frozen=True)
@@ -368,6 +388,15 @@ def _let_go_modifiers(timeout: float = 0.8) -> None:
     _send([_key(vk, up=True) for vk, _ in MOD_KEYS if _pressed(vk)])
 
 
+@dataclass(frozen=True)
+class Note:
+    """One line of the journal: what happened to a word, or why a window is not followed."""
+    when: float
+    word: str
+    why: str
+    fixed: bool = False
+
+
 @dataclass
 class _Done:
     fix: Fix
@@ -377,15 +406,20 @@ class _Done:
 
 class AutoSwitcher(QObject):
     corrected = Signal(str, str)  # before, after
-    undone = Signal(str)  # the word now kept as typed
+    undone = Signal(str, bool)  # the word now kept as typed; whether for good
     flipped = Signal(str, str)  # the text now typed, its layout
     lost_track = Signal(bool)  # a flip found other text before the caret: the clipboard fixer takes it, whole line or not
 
-    def __init__(self, detector: Detector, exceptions_file: Path) -> None:
+    def __init__(self, detector: Detector, exceptions_file: Path, learned_file: Path | None = None) -> None:
         super().__init__()
         self.detector = detector
         self.session = Session(detector)
         self.exceptions_file = exceptions_file
+        self.learned_file = learned_file
+        # Words undone once (kept until restart); a second undo, after a restart, keeps them for good.
+        self.struck_file = exceptions_file.with_name("autoswitch_undone.txt")
+        self._struck: set[str] = set()
+        self.journal: deque[Note] = deque(maxlen=60)  # in memory only: it holds what was typed
         self.enabled = True
         self.skip_fullscreen = True
         self.terminal_answers = True  # y/yes/n/no typed in Russian in a terminal
@@ -412,7 +446,13 @@ class AutoSwitcher(QObject):
         self._seen = 0  # tick count of the last event a hook received
         self._stopped = threading.Event()
         self._file_lock = threading.Lock()
+        self._window_why = ""  # why the focused window is not followed
         self.load_exceptions()
+        self.load_learned()
+        try:
+            self._struck = set(self.struck_file.read_text(encoding="utf-8").split())
+        except (FileNotFoundError, OSError):
+            self._struck = set()
 
     # --- settings ---
 
@@ -451,6 +491,49 @@ class AutoSwitcher(QObject):
     def update_exceptions(self, added: set[str], removed: set[str]) -> None:
         self.detector.exceptions = (self.detector.exceptions - removed) | added
         self.save_exceptions()
+        if added & self.detector.learned.keys():  # undone: what was learned was wrong
+            self.detector.learned = {k: v for k, v in self.detector.learned.items() if k not in added}
+            self.save_learned()
+
+    def load_learned(self) -> None:
+        learned: dict[str, str] = {}
+        if self.learned_file:
+            try:
+                for line in self.learned_file.read_text(encoding="utf-8").splitlines():
+                    parts = line.split()
+                    if len(parts) == 2 and parts[1] in LANG_IDS:
+                        learned[parts[0].lower()] = parts[1]
+            except FileNotFoundError:
+                pass
+        self.detector.learned = learned
+
+    def save_learned(self) -> None:
+        if not self.learned_file:
+            return
+        with self._file_lock:
+            lines = [f"{keys} {lang}" for keys, lang in sorted(self.detector.learned.items())]
+            self.learned_file.write_text("\n".join(lines), encoding="utf-8")
+
+    def set_learned(self, learned: dict[str, str]) -> None:
+        self.detector.learned = dict(learned)
+        self.save_learned()
+
+    def learn(self, keys: str, lang: str) -> None:
+        """The person flipped this word by hand: from now on it is switched by itself."""
+        keys = keys.lower()
+        if not keys or self.detector.learned.get(keys) == lang:
+            return
+        self.detector.learned = {**self.detector.learned, keys: lang}
+        self.save_learned()
+        self.detector.soft_exceptions = self.detector.soft_exceptions - {keys}
+        self._struck.discard(keys)
+        if keys in self.detector.exceptions:
+            self.detector.exceptions = self.detector.exceptions - {keys}
+            self.save_exceptions()
+        log.info("learned a word to switch to %s", lang)
+
+    def note(self, word: str, why: str, fixed: bool = False) -> None:
+        self.journal.append(Note(time.time(), word, why, fixed))
 
     # --- life cycle ---
 
@@ -567,6 +650,8 @@ class AutoSwitcher(QObject):
                 self._reset("edge")
                 self._window = self._window_kind(hwnd)
                 self._kbd_thread = layout_thread(hwnd)
+                if self._window != "ok" and self._window_why:
+                    self.note("", self._window_why)
             if self._window == "off":
                 self._reset()
                 return False
@@ -582,6 +667,8 @@ class AutoSwitcher(QObject):
                 return self._backspace(hwnd)
             layout = self._fast_layout(hwnd)
             if layout is None:
+                if vk in DELIMITERS and self._line:
+                    self.note("", "раскладка окна не русская и не английская")
                 self._reset()
                 return False
             if vk in DELIMITERS:
@@ -644,6 +731,8 @@ class AutoSwitcher(QObject):
         if self._answer(vk, hwnd, layout):
             return True
         word = self._line[self._word_start():]
+        if word and self.enabled and self._window == "ok" and {p.layout for p in word} != {layout}:
+            self.note(render(word, layout), "слово набрано в двух раскладках: переключали вручную")
         if not word or not self.enabled or self._window != "ok" or {p.layout for p in word} != {layout}:
             # A second space or an empty line: nothing to judge, and the words before no longer sit
             # one space apart, so they cannot be fixed together with the next. Or a word typed in
@@ -652,10 +741,19 @@ class AutoSwitcher(QObject):
             self._finish(vk)
             return False
         if focused_is_password(hwnd):
+            self.note("•••", "поле пароля")
             self.session.reset()
             self._finish(vk)
             return False
-        fix = self.session.word("".join(char_of(p, layout) for p in word), layout)
+        keys = "".join(char_of(p, layout) for p in word)
+        fix = self._command(word, keys, layout) if vk == VK_SPACE else None
+        if fix is None:
+            fix = self.session.word(keys, layout)
+            if fix is None and self.session.last is not None:
+                self.note(render(word, layout), REASONS.get(self.session.last.reason, self.session.last.reason))
+        else:
+            self.session.reset()
+            self.session.context = "en"
         if vk != VK_SPACE:
             self.session.reset()  # a new line or another field: the next words start afresh
         if fix is None:
@@ -664,7 +762,8 @@ class AutoSwitcher(QObject):
         start = self._run_start(len(fix.keys))
         run = self._line[start:]
         if len(run) != fix.erase or render(run, layout) != fix.original:
-            log.warning("run does not match the fix (%r vs %r), skipped", render(run, layout), fix.original)
+            log.warning("run does not match the fix, skipped")
+            self.note(render(run, layout), "сбился счёт набранного (автоповтор, вставка)")
             self.session.reset()
             self._finish(vk)
             return False
@@ -677,13 +776,26 @@ class AutoSwitcher(QObject):
         self._jobs.put(("fix", fix, hwnd, layout, vk, run, origin))
         return True
 
+    def _command(self, word: list[Press], keys: str, layout: str) -> Fix | None:
+        """The first word of a terminal line, typed in Russian, is a command: ды → ls, пше → git."""
+        if (not self._terminal or not self.terminal_answers or self._origin != "edge" or layout != "ru"
+                or self._word_start() != 0 or self.detector.is_exception(keys)):
+            return None
+        text = render(word, "en")
+        if text.lower() not in COMMANDS:
+            return None
+        return Fix(len(word), text, "en", render(word, "ru"), [keys])
+
     def _answer(self, vk: int, hwnd: int, layout: str) -> bool:
-        """A terminal asks [y/N] and the answer went in the Russian layout: нуы → yes, н → y, тщ → no."""
+        """A terminal asks [y/N] and the answer went in the Russian layout: нуы → yes, н → y, тщ → no.
+        A command alone on its line is fixed the same way: ды → ls, сды → cls."""
         run = self._line
         if (vk == VK_SPACE or not self.enabled or not self.terminal_answers or not self._terminal
-                or self._origin != "edge" or layout != "ru" or not run or len(run) > 3
-                or any(p.layout != "ru" or p.vk == VK_SPACE for p in run)
-                or render(run, "en").lower() not in ANSWERS):
+                or self._origin != "edge" or layout != "ru" or not run
+                or any(p.layout != "ru" or p.vk == VK_SPACE for p in run)):
+            return False
+        typed = render(run, "en").lower()
+        if not ((len(run) <= 3 and typed in ANSWERS) or typed in COMMANDS) or self.detector.is_exception(render(run, "en")):
             return False
         job = ("answer", len(run), render(run, "ru"), render(run, "en"), hwnd, vk)
         self._reset("edge")
@@ -709,16 +821,20 @@ class AutoSwitcher(QObject):
                 return False
             source = letters[-1].layout
             target = other(source)
+            # One word flipped by hand is a word to switch by itself next time.
+            learn = "" if whole_line or len(letters) != len(run) else "".join(char_of(p, source) for p in letters)
             self._line[start:] = [replace(p, layout=target) for p in run]
             self.session.reset()
             self._last = None
             self._busy = True
-            self._jobs.put(("flip", render(run, source), render(run, target), target, switch_layout, hwnd, whole_line))
+            self._jobs.put(("flip", render(run, source), render(run, target), target, switch_layout, hwnd, whole_line,
+                            learn))
             return True
 
     # --- helpers for the hook ---
 
     def _window_kind(self, hwnd: int) -> str:
+        self._window_why = ""
         try:
             _, pid = win32process.GetWindowThreadProcessId(hwnd)
         except Exception:
@@ -730,8 +846,12 @@ class AutoSwitcher(QObject):
         name = process_name(hwnd).lower()
         self._terminal = name in TERMINALS
         if name in self.excluded:
+            self._window_why = f"{name or 'программа'} в программах-исключениях"
             return "answers" if self._terminal and self.terminal_answers else "off"
-        return "off" if self.skip_fullscreen and is_fullscreen(hwnd) else "ok"
+        if self.skip_fullscreen and is_fullscreen(hwnd):
+            self._window_why = f"{name or 'окно'} на весь экран (игры пропускаются, меняется в настройках)"
+            return "off"
+        return "ok"
 
     def _fast_layout(self, hwnd: int) -> str | None:
         """The window's layout through the thread found when it got the focus: one call, cheap
@@ -801,6 +921,11 @@ class AutoSwitcher(QObject):
                 "middle": "the word began before we started following it",
                 "password": "a password field",
             }[why])
+            self.note(fix.original, {
+                "changed": "текст в поле не совпал с набранным (автодополнение, вставка)",
+                "middle": "слово начато до того, как курсор сюда попал",
+                "password": "поле пароля",
+            }[why])
             type_fix(0, "", delimiter)  # leave the text alone, let the delimiter through
             with self._lock:
                 self.session.reset()
@@ -812,6 +937,7 @@ class AutoSwitcher(QObject):
             return
         type_fix(fix.erase, fix.text, delimiter)
         self._switch(hwnd, fix.layout)
+        self.note(f"{fix.original} → {fix.text}", "исправлено", fixed=True)
         with self._lock:
             # After Enter or Tab the text may already be sent or left behind: no undo then.
             self._last = _Done(fix, layout, run) if delimiter == VK_SPACE else None
@@ -820,10 +946,11 @@ class AutoSwitcher(QObject):
     def _type_answer(self, erase: int, original: str, text: str, hwnd: int, delimiter: int) -> None:
         type_fix(erase, text, delimiter)
         self._switch(hwnd, "en")
-        log.info("terminal answer %r", text)
+        self.note(f"{original} → {text}", "исправлено в терминале", fixed=True)
         self.corrected.emit(original, text)
 
-    def _flip(self, original: str, text: str, target: str, switch_layout: bool, hwnd: int, whole_line: bool) -> None:
+    def _flip(self, original: str, text: str, target: str, switch_layout: bool, hwnd: int, whole_line: bool,
+              learn: str = "") -> None:
         _let_go_modifiers()
         if self._field_says(original) == "changed":
             log.info("flip: the text before the caret is not what was typed, the clipboard takes over")
@@ -834,6 +961,9 @@ class AutoSwitcher(QObject):
         type_fix(len(original), text, None)
         if switch_layout:
             self._switch(hwnd, target)
+        if learn:
+            self.learn(learn, target)
+            self.note(text, "исправлено вручную: дальше буду исправлять сам", fixed=True)
         self.flipped.emit(text, target)
 
     def _undo(self, done: _Done, hwnd: int) -> None:
@@ -855,8 +985,25 @@ class AutoSwitcher(QObject):
                 self._line[-n:] = done.run  # the caret is back at the end of that word
             else:
                 self._reset()
-        self.update_exceptions({keys.lower() for keys in fix.keys}, set())
-        self.undone.emit(fix.original)
+        keys = {k.lower() for k in fix.keys}
+        for_good = keys & self._struck
+        # An accidental Backspace must not switch a word off for ever: the first undo keeps it
+        # until the app restarts, a second one (after that) for good.
+        self.detector.soft_exceptions = self.detector.soft_exceptions | keys
+        if self.detector.learned.keys() & keys:
+            self.detector.learned = {k: v for k, v in self.detector.learned.items() if k not in keys}
+            self.save_learned()
+        if for_good:
+            self.update_exceptions(for_good, set())
+        self._struck |= keys
+        try:
+            with self._file_lock:
+                self.struck_file.write_text("\n".join(sorted(self._struck)), encoding="utf-8")
+        except OSError:
+            log.exception("undone words not saved")
+        self.note(fix.original, "отменено второй раз: больше не трогаю (вернуть — Pause)" if for_good
+                  else "отменено: не трогаю до перезапуска; ещё одна отмена потом — навсегда")
+        self.undone.emit(fix.original, bool(for_good))
 
     def _switch(self, hwnd: int, lang: str) -> None:
         """Asks the window for another layout and waits until it takes it, so that the keys held
