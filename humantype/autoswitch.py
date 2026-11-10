@@ -50,6 +50,7 @@ INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 MARKER = 0x48545950  # "HTYP": our own injected keys carry it so the hook can skip them
+PROBE_VK = 0xE8  # a key no keyboard has: its release, sent by the watchdog, shows the hook is alive
 
 LRESULT = ctypes.c_ssize_t
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
@@ -159,6 +160,7 @@ DELIMITERS = {VK_SPACE, VK_RETURN, VK_TAB}  # keys that end a word and get it ju
 LANGS = {LANG_EN: "en", LANG_RU: "ru"}
 LANG_IDS = {"en": LANG_EN, "ru": LANG_RU}
 MOD_KEYS = ((0x12, 0x0001), (0x11, 0x0002), (0x10, 0x0004), (0x5B, 0x0008), (0x5C, 0x0008))  # vk, MOD_* of RegisterHotKey
+HELD_MODS = (0x11, 0x12, 0x5B, 0x5C)  # Ctrl, Alt, Win: a key held with them is a shortcut, not text
 MAX_LINE = 300
 # A terminal asking [y/N]: these answers typed in the Russian layout (н, нуы, т, тщ) are fixed on Enter.
 ANSWERS = {"y", "yes", "n", "no"}
@@ -438,12 +440,14 @@ class AutoSwitcher(QObject):
         self._terminal = False
         self._last: _Done | None = None
         self._busy = False
-        self._held: list[tuple[int, bool]] = []  # keys typed while a fix was being made
+        # Keys typed while a fix was being made: vk, Shift, and the Ctrl/Alt/Win held with it.
+        self._held: list[tuple[int, bool, tuple[int, ...]]] = []
         self._jobs: queue.Queue = queue.Queue()
         self._thread_id = 0
         self._hooks: list[int] = []
         self._procs = (HOOKPROC(self._on_key), HOOKPROC(self._on_mouse))
         self._seen = 0  # tick count of the last event a hook received
+        self._probe = threading.Event()  # the hook saw the watchdog's probe key
         self._stopped = threading.Event()
         self._file_lock = threading.Lock()
         self._window_why = ""  # why the focused window is not followed
@@ -601,9 +605,21 @@ class AutoSwitcher(QObject):
             hwnd = user32.GetForegroundWindow() or 0
             if not hwnd or is_elevated(hwnd):
                 continue  # the lock screen or an admin window: hooks get nothing there anyway
+            # Input the hooks did not see is not always a dead hook (some of it never reaches
+            # low-level hooks at all), and setting them again forgets the word being typed.
+            # Ask the hook itself first.
+            if self._hook_alive():
+                self._seen = kernel32.GetTickCount()
+                continue
             log.warning("keyboard hook went silent, setting it again")
             self._seen = kernel32.GetTickCount()
             user32.PostThreadMessageW(self._thread_id, WM_REHOOK, 0, 0)
+
+    def _hook_alive(self) -> bool:
+        """Sends the release of a key that does not exist, marked as ours: a live hook sees it at once."""
+        self._probe.clear()
+        _send([_key(PROBE_VK, up=True)])
+        return self._probe.wait(0.5)
 
     # --- the hooks (keep them quick: Windows drops a hook that stalls) ---
 
@@ -626,6 +642,8 @@ class AutoSwitcher(QObject):
     def _handle(self, wparam: int, kb: KBDLLHOOKSTRUCT) -> bool:
         """Returns True to swallow the key."""
         if kb.dwExtraInfo == MARKER:
+            if kb.vkCode == PROBE_VK:
+                self._probe.set()
             return False
         vk = kb.vkCode
         if wparam in (WM_KEYUP, WM_SYSKEYUP):
@@ -642,7 +660,7 @@ class AutoSwitcher(QObject):
             return False
         with self._lock:
             if self._busy:  # a fix is being typed: hold this key and replay it after
-                self._held.append((vk, _pressed(0x10)))
+                self._held.append((vk, _pressed(0x10), tuple(m for m in HELD_MODS if _pressed(m))))
                 return True
             hwnd = user32.GetForegroundWindow() or 0
             if hwnd != self._hwnd:
@@ -1039,28 +1057,39 @@ class AutoSwitcher(QObject):
 
     def _take_held_backspace(self) -> bool:
         with self._lock:
-            if self._held and self._held[0][0] == VK_BACK:
+            if self._held and self._held[0][0] == VK_BACK and not self._held[0][2]:
                 del self._held[0]
                 return True
             return False
 
     def _release_held(self) -> None:
-        with self._lock:
-            held, self._held = self._held, []
-            self._busy = False
-        if not held:
-            return
-        time.sleep(0.01)
+        """Replays the keys held while a fix was typed. The line stays busy until none are left:
+        a key pressed during the replay is held too, so it cannot get ahead of the replayed ones."""
+        first = True
+        while True:
+            with self._lock:
+                held, self._held = self._held, []
+                if not held:
+                    self._busy = False
+                    return
+            if first:
+                time.sleep(0.01)
+                first = False
+            self._replay(held)
+
+    def _replay(self, held: list[tuple[int, bool, tuple[int, ...]]]) -> None:
         inputs: list[INPUT] = []
-        for vk, shift in held:
-            if shift and not _pressed(0x10):
-                inputs += [_key(0x10), _key(vk), _key(vk, up=True), _key(0x10, up=True)]
-            else:
-                inputs += [_key(vk), _key(vk, up=True)]
+        for vk, shift, combo in held:
+            # A shortcut (Ctrl+S right after a word) must stay a shortcut even if its modifier
+            # was let go while the fix was being typed: press what is no longer down around the key.
+            mods = [m for m in ((0x10,) if shift else ()) + combo if not _pressed(m)]
+            inputs += [_key(m) for m in mods] + [_key(vk), _key(vk, up=True)] + [_key(m, up=True) for m in reversed(mods)]
             with self._lock:
                 # Replayed keys carry MARKER and skip the hook: keep the line in step here.
                 layout = self._fast_layout(self._hwnd)
-                if vk == VK_BACK:
+                if combo:
+                    self._reset()  # a shortcut: the text may be anything now
+                elif vk == VK_BACK:
                     if self._line:
                         if self._line.pop().vk == VK_SPACE:
                             self.session.reset()

@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import webbrowser
+from logging.handlers import RotatingFileHandler
 
 import win32api
 import win32event
@@ -465,12 +466,14 @@ def _cleanup() -> None:
 
 
 def main() -> None:
+    # The log is kept small: one file of 512 KB and the one before it.
     logging.basicConfig(
-        filename=LOG_FILE,
+        handlers=[RotatingFileHandler(LOG_FILE, maxBytes=512 * 1024, backupCount=1, encoding="utf-8")],
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        encoding="utf-8",
     )
+    for noisy in ("comtypes", "pymorphy3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     sys.excepthook = lambda *exc: log.critical("unhandled", exc_info=exc)
     # The keyboard hook must get the GIL back fast: Windows drops a hook that answers late.
     sys.setswitchinterval(0.001)

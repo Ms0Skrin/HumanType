@@ -114,7 +114,11 @@ class Settings:
         return settings
 
     def save(self) -> None:
-        SETTINGS_FILE.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
+        # Through a temporary file: a crash or power cut mid-write must not leave half a file,
+        # which would silently put every setting back to its default.
+        tmp = SETTINGS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(SETTINGS_FILE)
 
 
 def _launch_command() -> str:

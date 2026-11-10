@@ -293,5 +293,43 @@ check("idle: hook newer", A._idle_ms(12_000), 0)
 A.user32.GetLastInputInfo.side_effect = lambda p: (setattr(p._obj, "dwTime", 100), 1)[1]
 check("idle: tick wrap", A._idle_ms(0xFFFFFF00), 356)
 
+# a shortcut pressed while a fix is being typed stays a shortcut, even with Ctrl let go by then
+shortcuts = []
+plain_send = A._send
+
+
+def send_with_ctrl(inputs):
+    ctrl, rest = False, []
+    for i in inputs:
+        ki = i.u.ki
+        if ki.wVk == 0x11:
+            ctrl = not (ki.dwFlags & A.KEYEVENTF_KEYUP)
+        elif ctrl:
+            if not ki.dwFlags & A.KEYEVENTF_KEYUP:
+                shortcuts.append(ki.wVk)
+        else:
+            rest.append(i)
+    time.sleep(box.send_delay)
+    plain_send(rest)
+
+
+box.send_delay = 0.0
+A._send = send_with_ctrl
+reset(slow=0.05); type_("ghbdtn"); key(" ", False)
+box.pressed.add(0x11)
+sw._handle(A.WM_KEYDOWN, A.KBDLLHOOKSTRUCT(ord("S"), 0, 0, 0, 0))
+box.pressed.discard(0x11)
+idle()
+check("Ctrl+S during a fix: nothing typed", box.s(), "привет ")
+check("Ctrl+S during a fix: still a shortcut", shortcuts, [ord("S")])
+# a key pressed while the held ones are being replayed waits its turn
+reset(slow=0.05); box.send_delay = 0.08
+type_("ghbdtn"); key(" ", False); key("r", False)
+time.sleep(0.09)  # the fix is typed, the held "r" is on its way
+key("f", False); idle()
+box.send_delay = 0.0
+check("keys keep their order during the replay", box.s(), "привет ка")
+A._send = plain_send
+
 print("FAILS:", fails)
 sys.exit(1 if fails else 0)
