@@ -6,12 +6,13 @@ from copy import deepcopy
 from typing import Callable
 
 from PySide6.QtCore import Property, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QPainter
+from PySide6.QtGui import QColor, QFont, QKeyEvent, QPainter
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 import win32gui
 
-from . import theme
+from . import theme, wordlists
 from .autoswitch import AutoSwitcher, process_name
 from .config import DEFAULT_EXCLUDED, Hotkey, Settings
 from .layout import EN_TO_RU
@@ -36,6 +37,7 @@ from .hotkeys import MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN
 from .icons import app_icon, line_icon
 from .paths import APP_NAME, DATA_DIR, VERSION
 from .popup import plural
+from .stats import Stats
 
 user32 = ctypes.windll.user32
 
@@ -271,6 +273,52 @@ class Segmented(QFrame):
         self._buttons.get(value, next(iter(self._buttons.values()))).setChecked(True)
 
 
+class Bars(QWidget):
+    """The fixes of the last days as bars, today on the right."""
+
+    def __init__(self, days: list[tuple[str, int]]) -> None:
+        super().__init__()
+        self.days = days
+        self.setMinimumHeight(120)
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        small = QFont(self.font())
+        small.setPointSizeF(7.5)
+        p.setFont(small)
+        n = max(1, len(self.days))
+        top = max(1, max((count for _, count in self.days), default=0))
+        slot = self.width() / n
+        width = min(26.0, slot * 0.62)
+        base = self.height() - 18
+        room = base - 16
+        for i, (day, count) in enumerate(self.days):
+            x = slot * i + (slot - width) / 2
+            height = max(3.0, room * count / top) if count else 3.0
+            today = i == n - 1
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(theme.ACCENT if today else theme.ACCENT_DEEP) if count else QColor(theme.SURFACE_3))
+            p.drawRoundedRect(QRectF(x, base - height, width, height), 4, 4)
+            p.setPen(QColor(theme.TEXT if today else theme.MUTED))
+            if count:
+                p.drawText(QRectF(slot * i, base - height - 15, slot, 13), Qt.AlignmentFlag.AlignCenter, str(count))
+            p.drawText(QRectF(slot * i, base + 3, slot, 14), Qt.AlignmentFlag.AlignCenter, day[8:10] + "." + day[5:7])
+
+
+def figure(value: int, caption: str) -> QFrame:
+    """A card with one big number."""
+    card = QFrame()
+    card.setObjectName("row")
+    number = _label(f"{value:,}".replace(",", " "), "bigName")
+    layout = QVBoxLayout(card)
+    layout.setContentsMargins(16, 12, 16, 12)
+    layout.setSpacing(0)
+    layout.addWidget(number)
+    layout.addWidget(_label(caption, "rowHint"))
+    return card
+
+
 def running_apps() -> list[str]:
     """Process names of the windows open right now, for the exclusion picker."""
     names: set[str] = set()
@@ -292,7 +340,8 @@ def running_apps() -> list[str]:
 class ListEditor(QFrame):
     """A card holding a list with remove, and optionally an input with add."""
 
-    def __init__(self, title: str, hint: str, items: list[str], picker: QComboBox | None = None, display=None) -> None:
+    def __init__(self, title: str, hint: str, items: list[str], picker: QComboBox | None = None, display=None,
+                 removable: bool = True) -> None:
         super().__init__()
         self.setObjectName("row")
         self.display = display or (lambda s: s)
@@ -323,6 +372,7 @@ class ListEditor(QFrame):
             layout.addLayout(line)
         layout.addWidget(self.list)
         layout.addWidget(remove, 0, Qt.AlignmentFlag.AlignRight)
+        remove.setVisible(removable)
 
     def set_items(self, items: list[str]) -> None:
         self.list.clear()
@@ -363,6 +413,7 @@ class SettingsWindow(QDialog):
         ("swap", "Автопереключение"),
         ("clipboard", "История буфера"),
         ("sliders", "Поведение"),
+        ("chart", "Статистика"),
         ("info", "О программе"),
     ]
 
@@ -373,9 +424,11 @@ class SettingsWindow(QDialog):
         suspend: Callable[[], None],
         history: History | None = None,
         autoswitcher: AutoSwitcher | None = None,
+        stats: Stats | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.stats = stats
         self.settings = settings
         self.apply = apply
         self.suspend = suspend
@@ -392,6 +445,10 @@ class SettingsWindow(QDialog):
         self.hk_line = HotkeyButton(settings.fix_line)
         self.hk_popup = HotkeyButton(settings.history_popup)
         self.hk_toggle = HotkeyButton(settings.toggle_autoswitch)
+        self.hk_case = HotkeyButton(settings.fix_case)
+        self.hk_translit = HotkeyButton(settings.fix_translit)
+        self.app_layouts = Toggle(settings.app_layouts)
+        self.layout_indicator = Toggle(settings.layout_indicator)
         self.limit = QSpinBox()
         self.limit.setRange(10, 2000)
         self.limit.setSingleStep(50)
@@ -412,6 +469,9 @@ class SettingsWindow(QDialog):
                 "Кликни по клавише и нажми новое сочетание. Esc — отмена, Backspace — выключить.",
                 row("Исправить раскладку", "Выделенный текст, а если ничего не выделено — последнее слово", self.hk_word),
                 row("Исправить всю строку", "Всё, что набрано от начала строки до курсора", self.hk_line),
+                row("Исправить регистр", "пРИВЕТ → Привет. Ещё раз — по кругу: привет → Привет → ПРИВЕТ. "
+                    "Выделенный текст или последнее слово", self.hk_case),
+                row("Транслит", "privet → привет и обратно. Выделенный текст или последнее слово", self.hk_translit),
                 row("История буфера", "Открыть список скопированного у курсора", self.hk_popup),
                 row("Автопереключение вкл/выкл", "Быстро включить или выключить автоматическое исправление", self.hk_toggle),
             )
@@ -438,6 +498,11 @@ class SettingsWindow(QDialog):
                 "Как HumanType ведёт себя в работе.",
                 row("Переключать раскладку", "После исправления включить язык, на котором текст теперь написан", self.switch_layout),
                 row("Подсказки у курсора", "Короткие уведомления вроде «✓ РУ: привет»", self.show_toasts),
+                row("Своя раскладка у каждой программы", "Запоминает, на каком языке вы пишете в программе, "
+                    "и возвращает его, когда вы в неё переходите: в терминале — английский, в мессенджере — русский",
+                    self.app_layouts),
+                row("Индикатор раскладки", "Маленькая метка RU / EN у текстового курсора, когда раскладка меняется. "
+                    "В играх на весь экран не показывается", self.layout_indicator),
                 row("Запуск вместе с Windows", "HumanType будет в трее сразу после входа", self.autostart),
                 row(
                     "Работать в окнах администратора",
@@ -447,6 +512,7 @@ class SettingsWindow(QDialog):
                 ),
             )
         )
+        self.stack.addWidget(self._stats_page())
         self.stack.addWidget(self._about_page())
 
         # --- sidebar ---
@@ -527,6 +593,7 @@ class SettingsWindow(QDialog):
             [("careful", "Осторожно"), ("normal", "Нормально"), ("bold", "Смело")], settings.autoswitch_sensitivity
         )
         self.short_words = Toggle(settings.autoswitch_short_words)
+        self.mid_word = Toggle(settings.autoswitch_mid_word)
         self.skip_fullscreen = Toggle(settings.autoswitch_skip_fullscreen)
         self.autoswitch_notify = Toggle(settings.autoswitch_notify)
         self.terminal_answers = Toggle(settings.autoswitch_terminal_answers)
@@ -562,6 +629,8 @@ class SettingsWindow(QDialog):
             "HumanType следит за набором и сам исправляет слова, набранные не в той раскладке: "
             "ghbdtn → привет. Сразу после исправления Backspace вернёт как было.",
             row("Автопереключение раскладки", "Исправлять слова автоматически после пробела", self.autoswitch),
+            row("Исправлять на ходу", "Не ждать пробела: слово исправляется на пятой букве, если оно явно "
+                "из другой раскладки. Backspace сразу после — вернёт как было", self.mid_word),
             row(
                 "Чувствительность",
                 "Осторожно — только явные случаи. Смело — исправляет больше, в том числе редкие слова.",
@@ -578,7 +647,136 @@ class SettingsWindow(QDialog):
             self.excluded,
             self.learned_words,
             self.exception_words,
+            self._transfer_card(),
         )
+
+    def _transfer_card(self) -> QFrame:
+        export = QPushButton("Сохранить в файл…")
+        load = QPushButton("Загрузить из файла…")
+        for button, action in ((export, self._export_words), (load, self._import_words)):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(action)
+        buttons = QWidget()
+        line = QHBoxLayout(buttons)
+        line.setContentsMargins(0, 0, 0, 0)
+        line.addWidget(load)
+        line.addWidget(export)
+        return row("Перенос слов", "Выученные слова и исключения одним файлом: на другой компьютер, "
+                   "с Windows на Linux и обратно", buttons)
+
+    def _export_words(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить слова", "humantype-words.json", "HumanType (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(wordlists.dump({w.lower() for w in self.exception_words.items()}, self._learned()))
+        except OSError as error:
+            QMessageBox.warning(self, APP_NAME, f"Не удалось сохранить файл: {error}")
+
+    def _import_words(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Загрузить слова", "", "HumanType (*.json *.txt);;Все файлы (*)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                exceptions, learned = wordlists.parse(f.read())
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, APP_NAME, f"Не удалось прочитать файл: {error}")
+            return
+        have = {w.lower() for w in self.exception_words.items()}
+        have_learned = self._learned()
+        new_words = sorted(exceptions - have)
+        new_learned = {k: v for k, v in learned.items() if have_learned.get(k) != v and k not in exceptions | have}
+        self.exception_words.set_items(self.exception_words.items() + new_words)
+        merged = {**have_learned, **new_learned}
+        self.learned_words.set_items([f"{keys} {lang}" for keys, lang in sorted(merged.items()) if keys not in exceptions])
+        QMessageBox.information(
+            self, APP_NAME,
+            f"Добавлено исключений: {len(new_words)}, выученных слов: {len(new_learned)}.\nНажмите «Сохранить», чтобы применить.",
+        )
+
+    def _learned(self) -> dict[str, str]:
+        learned = {}
+        for item in self.learned_words.items():
+            parts = item.split()
+            if len(parts) == 2 and parts[1] in ("ru", "en"):
+                learned[parts[0].lower()] = parts[1]
+        return learned
+
+    def _stats_page(self) -> QWidget:
+        stats = self.stats
+        count = (lambda days: stats.count("fixed", days) + stats.count("manual", days)) if stats else (lambda days: 0)
+        figures = QWidget()
+        line = QHBoxLayout(figures)
+        line.setContentsMargins(0, 0, 0, 0)
+        line.setSpacing(10)
+        for value, caption in ((count(1), "исправлено сегодня"), (count(7), "за 7 дней"), (count(None), "за всё время")):
+            line.addWidget(figure(value, caption), 1)
+
+        chart = QFrame()
+        chart.setObjectName("row")
+        chart_layout = QVBoxLayout(chart)
+        chart_layout.setContentsMargins(16, 12, 16, 12)
+        chart_layout.addWidget(_label("Исправления по дням", "rowTitle"))
+        days = stats.last_days(14) if stats else []
+        manual = dict(stats.last_days(14, "manual")) if stats else {}
+        chart_layout.addWidget(Bars([(day, n + manual.get(day, 0)) for day, n in days]))
+        undone = stats.count("undone") if stats else 0
+        by_hand = stats.count("manual") if stats else 0
+        chart_layout.addWidget(_label(f"Из них вручную (Pause): {by_hand}   ·   отменено Backspace: {undone}", "rowHint"))
+
+        known = self.autoswitcher.detector.exceptions if self.autoswitcher else set()
+        candidates = [(keys, n) for keys, n in (stats.top_undone(30) if stats else []) if keys not in known]
+        self._undone_counts = dict(candidates)
+        self.undone_words = ListEditor(
+            "Чаще всего отменяете",
+            "Слова, исправление которых вы отменяли Backspace. Те, что HumanType трогать не должен, "
+            "добавьте в исключения — выделите их и нажмите кнопку.",
+            [keys for keys, _ in candidates],
+            display=lambda keys: f"{keys}   ·   {keys.translate(EN_TO_RU)}   ·   отменено: {self._undone_counts.get(keys, 0)}",
+            removable=False,
+        )
+        self.undone_words.list.setMinimumHeight(110)
+        to_exceptions = QPushButton("Выбранные — в исключения")
+        to_exceptions.setCursor(Qt.CursorShape.PointingHandCursor)
+        to_exceptions.clicked.connect(self._undone_to_exceptions)
+        self.undone_words.layout().addWidget(to_exceptions, 0, Qt.AlignmentFlag.AlignRight)
+
+        clear = QPushButton("Сбросить")
+        clear.setObjectName("danger")
+        clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear.clicked.connect(self._clear_stats)
+        return page(
+            "Статистика",
+            "Сколько слов HumanType исправил за вас. Считаются только количества; сами слова не записываются, "
+            "кроме тех, чьё исправление вы отменили.",
+            figures,
+            chart,
+            self.undone_words,
+            row("Сбросить статистику", "Обнулит счётчики и список отменённых слов", clear),
+        )
+
+    def _undone_to_exceptions(self) -> None:
+        chosen = [item.data(Qt.ItemDataRole.UserRole) for item in self.undone_words.list.selectedItems()]
+        if not chosen:
+            QMessageBox.information(self, APP_NAME, "Сначала выделите слова в списке.")
+            return
+        have = {w.lower() for w in self.exception_words.items()}
+        self.exception_words.set_items(self.exception_words.items() + [w for w in chosen if w not in have])
+        self.undone_words.set_items([w for w in self.undone_words.items() if w not in chosen])
+        QMessageBox.information(self, APP_NAME, f"В исключения добавлено: {len(chosen)}.\nНажмите «Сохранить», чтобы применить.")
+
+    def _clear_stats(self) -> None:
+        if self.stats and QMessageBox.question(self, APP_NAME, "Сбросить всю статистику?") == QMessageBox.StandardButton.Yes:
+            self.stats.clear()
+            self.stats.save()
+            index = self.stack.currentIndex()
+            old = self.stack.widget(index)
+            self.stack.removeWidget(old)
+            old.deleteLater()
+            self.stack.insertWidget(index, self._stats_page())
+            self.stack.setCurrentIndex(index)
 
     def _about_page(self) -> QWidget:
         big = QLabel()
@@ -642,6 +840,11 @@ class SettingsWindow(QDialog):
         return Settings(
             fix_word=self.hk_word.hotkey,
             fix_line=self.hk_line.hotkey,
+            fix_case=self.hk_case.hotkey,
+            fix_translit=self.hk_translit.hotkey,
+            app_layouts=self.app_layouts.isChecked(),
+            layout_indicator=self.layout_indicator.isChecked(),
+            autoswitch_mid_word=self.mid_word.isChecked(),
             history_popup=self.hk_popup.hotkey,
             history_limit=self.limit.value(),
             save_images=self.save_images.isChecked(),
@@ -665,6 +868,11 @@ class SettingsWindow(QDialog):
         self.hk_line.set_hotkey(defaults.fix_line)
         self.hk_popup.set_hotkey(defaults.history_popup)
         self.hk_toggle.set_hotkey(defaults.toggle_autoswitch)
+        self.hk_case.set_hotkey(defaults.fix_case)
+        self.hk_translit.set_hotkey(defaults.fix_translit)
+        self.app_layouts.setChecked(defaults.app_layouts)
+        self.layout_indicator.setChecked(defaults.layout_indicator)
+        self.mid_word.setChecked(defaults.autoswitch_mid_word)
         self.autoswitch.setChecked(defaults.autoswitch)
         self.sensitivity.set_value(defaults.autoswitch_sensitivity)
         self.short_words.setChecked(defaults.autoswitch_short_words)
@@ -681,7 +889,7 @@ class SettingsWindow(QDialog):
 
     def _save(self) -> None:
         new = self._collect()
-        hotkeys = (new.fix_word, new.fix_line, new.history_popup, new.toggle_autoswitch)
+        hotkeys = (new.fix_word, new.fix_line, new.fix_case, new.fix_translit, new.history_popup, new.toggle_autoswitch)
         combos = [(h.mods, h.vk) for h in hotkeys if h.is_set]
         if len(combos) != len(set(combos)):
             QMessageBox.warning(self, APP_NAME, "Одно и то же сочетание назначено на два действия.")
@@ -691,11 +899,7 @@ class SettingsWindow(QDialog):
             words = {w.lower() for w in self.exception_words.items()}
             self.autoswitcher.update_exceptions(words - self._initial_words, self._initial_words - words)
             self._initial_words = words
-            learned = {}
-            for item in self.learned_words.items():
-                parts = item.split()
-                if len(parts) == 2 and parts[1] in ("ru", "en"):
-                    learned[parts[0].lower()] = parts[1]
+            learned = self._learned()
             if learned != self.autoswitcher.detector.learned:
                 self.autoswitcher.set_learned(learned)
         failed = self.apply(new)

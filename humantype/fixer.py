@@ -6,11 +6,14 @@ from typing import Callable
 
 import win32con
 from PySide6.QtCore import QObject, QTimer
-from PySide6.QtGui import QGuiApplication
 
 from . import winapi
 from .history import History
-from .layout import LANG_RU, convert
+from .layout import LANG_EN, LANG_RU, convert
+
+LANG_NAMES = {LANG_RU: "РУ", LANG_EN: "EN"}
+# What a fix does to the text: the new text and the layout it now belongs to (None: leave the layout).
+Transform = Callable[[str], tuple[str, int | None]]
 
 log = logging.getLogger(__name__)
 
@@ -21,16 +24,18 @@ class LayoutFixer(QObject):
         self.history = history
         self.notify = notify
         self.switch_layout = True
+        self.on_layout_fixed: Callable[[], None] | None = None  # told of every layout fix made, for the statistics
         self._busy = False
 
-    def fix(self, whole_line: bool = False) -> None:
+    def fix(self, whole_line: bool = False, transform: Transform = convert, mark: str = "") -> None:
+        """Copies the selection (or the last word, or the line up to the caret), changes it with
+        `transform` and pastes it back. The clipboard is put back as it was, whatever was on it."""
         if self._busy:
             return
         self._busy = True
         hwnd = winapi.foreground()
         self.history.suppress(True)
-        saved_text = winapi.get_text()
-        saved_image = None if saved_text is not None else QGuiApplication.clipboard().image()
+        saved = winapi.snapshot()
         try:
             winapi.release_modifiers()
             text = self._copy_selection()
@@ -43,21 +48,27 @@ class LayoutFixer(QObject):
                 text = self._copy_selection()
             if not text:
                 self.notify("Нечего исправлять")
-                self._finish(saved_text, saved_image)
+                self._finish(saved)
                 return
-            fixed, lang = convert(text)
+            fixed, lang = transform(text)
+            if fixed == text:
+                self.notify("Нечего менять")
+                self._finish(saved)
+                return
             winapi.set_text(fixed)
             time.sleep(0.03)
             winapi.combo(win32con.VK_CONTROL, winapi.VK_V)
-            if self.switch_layout:
+            if self.switch_layout and lang is not None:
                 winapi.switch_layout(hwnd, lang)
-            self.notify(f"✓ {'РУ' if lang == LANG_RU else 'EN'}: {fixed.strip()[:40]}")
+            self.notify(f"✓ {mark or LANG_NAMES.get(lang, '')}: {fixed.strip()[:40]}")
+            if transform is convert and self.on_layout_fixed:
+                self.on_layout_fixed()
             # Give the window time to paste before the old clipboard comes back.
-            QTimer.singleShot(400, lambda: self._finish(saved_text, saved_image))
+            QTimer.singleShot(400, lambda: self._finish(saved))
         except Exception:
             log.exception("layout fix failed")
             self.notify("Не получилось исправить")
-            self._finish(saved_text, saved_image)
+            self._finish(saved)
 
     def _copy_selection(self) -> str:
         seq = winapi.clipboard_seq()
@@ -73,12 +84,11 @@ class LayoutFixer(QObject):
             return ""
         return text
 
-    def _finish(self, saved_text: str | None, saved_image) -> None:
+    def _finish(self, saved: winapi.Snapshot | None) -> None:
         try:
-            if saved_text is not None:
-                winapi.set_text(saved_text)
-            elif saved_image is not None and not saved_image.isNull():
-                QGuiApplication.clipboard().setImage(saved_image)
+            winapi.restore(saved)
+        except Exception:
+            log.exception("the clipboard was not put back")
         finally:
             # The restore itself raises a clipboard change: stay deaf a moment longer.
             QTimer.singleShot(300, lambda: self.history.suppress(False))

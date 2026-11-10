@@ -123,6 +123,7 @@ tmp = Path(tempfile.mkdtemp()) / "exc.txt"
 tmp.unlink(missing_ok=True)
 sw = A.AutoSwitcher(detector, tmp, tmp.with_name("learned.txt"))
 threading.Thread(target=sw._worker, daemon=True).start()
+sw.mid_word = False  # the fix at the fifth letter has its own checks at the end; these are for the fix at the space
 
 
 def idle():
@@ -330,6 +331,32 @@ key("f", False); idle()
 box.send_delay = 0.0
 check("keys keep their order during the replay", box.s(), "привет ка")
 A._send = plain_send
+
+# a word that clearly belongs to the other layout is fixed at its fifth letter, without waiting for the space
+sw.mid_word = True
+reset(); type_("ghbdt"); check("mid: fixed at the fifth letter", box.s(), "приве"); check("mid: layout", box.layout, "ru")
+type_("n rfr "); check("mid: the rest goes on in the new layout", box.s(), "привет как ")
+reset(); type_("ghbdtn "); type_(""); check("mid: Backspace after the space takes the word back", box.s(), "ghbdtn")
+check("mid: layout back", box.layout, "en")
+type_(" ghbdtn "); check("mid: the undone word is left alone", box.s(), "ghbdtn ghbdtn ")
+reset(); type_("ntcnb"); check("mid: another word", box.s(), "тести"); type_("")
+check("mid: Backspace right after undoes", box.s(), "ntcnb"); check("mid: undo, layout back", box.layout, "en")
+type_("hjdfnm "); check("mid: the undone word stays when it ends", box.s(), "ntcnbhjdfnm ")
+type_("ntcnbhjdfnm "); check("mid: ... and the next time", box.s(), "ntcnbhjdfnm ntcnbhjdfnm ")
+reset(); type_("z nt,z k.,k."); check("mid: the short words before it are fixed too", box.s(), "я тебя люблю")
+reset(); type_("hello world "); check("mid: the right layout is untouched", box.s(), "hello world ")
+reset("ru"); type_("hello"); check("mid: ru → en", box.s(), "hello"); check("mid: ru → en layout", box.layout, "en")
+reset(); type_("Ghbdtn "); check("mid: capital letter", box.s(), "Привет ")
+reset(); type_("GHBDTN "); check("mid: all capitals wait for the space", box.s(), "ПРИВЕТ ")
+reset(); type_("abc"); vkey(0x25); type_("ghbdtn "); check("mid: not in the middle of a word", box.s(), "abcghbdtn ")
+reset(); type_("ghbdtt"); type_("dtn "); check("mid: erased below five and typed again", box.s(), "привет ")
+type_(""); check("mid: no undo for a word typed again in the new layout", box.s(), "привет")
+reset(slow=0.05, switch_delay=0.03); type_("ghbdtn rfr ", False); check("mid: fast typing through the fix", box.s(), "привет как ")
+field["says"] = "autocompleted"
+reset(); type_("ghbdtn "); check("mid: the field holds other text, no fix", box.s(), "ghbdtn ")
+field["says"] = None
+sw.mid_word = False
+reset(); type_("ghbdt"); check("mid: off in the settings", box.s(), "ghbdt")
 
 print("FAILS:", fails)
 sys.exit(1 if fails else 0)

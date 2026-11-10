@@ -1,7 +1,9 @@
 """The app menu entry: turns automatic switching on and off, starting the service if it is not running;
-`update` installs the newest release (linux/install.sh --release) and says how it went.
+`update` installs the newest release (linux/install.sh --release) and says how it went;
+`export-words FILE` and `import-words FILE` carry the exceptions to and from another computer
+(the file is the one the Windows settings save and load).
 
-    python -m humantype.linux.ctl [toggle|on|off|update]
+    python -m humantype.linux.ctl [toggle|on|off|update|export-words FILE|import-words FILE]
 """
 
 import subprocess
@@ -64,10 +66,36 @@ def update() -> int:
     return 1
 
 
+def words(action: str, path: str) -> int:
+    """The exceptions as a file for another computer, or taken from one. Linux keeps no learned
+    words yet: those in a file from Windows are left out, and none are written."""
+    from .. import wordlists
+    from . import config
+
+    if action == "export-words":
+        Path(path).write_text(wordlists.dump(config.load_exceptions(), {}), encoding="utf-8")
+        print(f"saved to {path}")
+        return 0
+    try:
+        exceptions, learned = wordlists.parse(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        print(f"cannot read {path}: {error}", file=sys.stderr)
+        return 1
+    have = config.load_exceptions()
+    config.save_exceptions(have | exceptions)  # the service sees the file change and reads it again
+    print(f"exceptions added: {len(exceptions - have)}" + (f"; learned words skipped: {len(learned)}" if learned else ""))
+    return 0
+
+
 def main() -> int:
     action = sys.argv[1] if len(sys.argv) > 1 else "toggle"
     if action == "update":
         return update()
+    if action in ("export-words", "import-words"):
+        if len(sys.argv) < 3:
+            print(f"usage: python -m humantype.linux.ctl {action} FILE", file=sys.stderr)
+            return 2
+        return words(action, sys.argv[2])
     proxy = daemon()
     if proxy is None:
         # Not running: starting it is what was asked for, whatever the action.

@@ -22,6 +22,8 @@ LINE_ICONS = {
     "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
     "info": '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>',
     "image": '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
+    "chart": '<path d="M3 21h18"/><path d="M6 21v-7M11 21V5M16 21v-10M21 21v-4"/>',
+    "type": '<path d="M4 7V5h16v2"/><path d="M12 5v14"/><path d="M9 19h6"/>',
     "pin": '<path d="M12 17v5"/><path d="M9 10.8V5h6v5.8l2.4 2.6a1 1 0 0 1-.7 1.6H7.3a1 1 0 0 1-.7-1.6Z"/><path d="M8 2h8"/>',
 }
 

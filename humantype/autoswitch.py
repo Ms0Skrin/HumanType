@@ -5,6 +5,7 @@ last jumped, each key with the layout it was pressed in. When a word ends with a
 the `Session` whether the word (and maybe the short ones before it) belongs to the other layout.
 If so the space is held back, a worker erases the word, types it right, switches the window's
 layout and lets the space through; keys typed meanwhile are held and replayed after.
+A word that clearly belongs to the other layout is fixed without waiting for its end, at its fifth letter.
 A Backspace right after a fix undoes it and remembers the word as an exception.
 Enter and Tab end a word too: it is fixed before the key goes through, but cannot be undone.
 In a terminal, y/yes/n/no typed in the Russian layout (н, нуы, т, тщ) are fixed on Enter.
@@ -31,7 +32,7 @@ from PySide6.QtCore import QObject, Signal
 
 from . import elevation, uia
 from .config import DEFAULT_EXCLUDED, TERMINAL_COMMANDS, TERMINALS
-from .detector import SENSITIVITY, Detector, Fix, Session
+from .detector import MID_LEN, SENSITIVITY, Detector, Fix, Session
 from .layout import EN_TO_RU, LANG_EN, LANG_RU
 
 log = logging.getLogger(__name__)
@@ -404,6 +405,7 @@ class _Done:
     fix: Fix
     old_layout: str
     run: list[Press]  # the keys as they were first typed
+    mid: bool = False  # fixed in the middle of the word: no space after it
 
 
 class AutoSwitcher(QObject):
@@ -425,6 +427,7 @@ class AutoSwitcher(QObject):
         self.enabled = True
         self.skip_fullscreen = True
         self.terminal_answers = True  # y/yes/n/no typed in Russian in a terminal
+        self.mid_word = True  # fix a word at its fifth letter, without waiting for the space
         self.excluded: set[str] = {name.lower() for name in DEFAULT_EXCLUDED}
         self.flip_hotkeys: set[tuple[int, int]] = set()  # (MOD_*, vk) of the hotkeys that flip the line
         self._own_pid = win32api.GetCurrentProcessId()
@@ -439,6 +442,8 @@ class AutoSwitcher(QObject):
         self._window = "ok"  # "ok"; "answers": only terminal answers are fixed; "off": not followed
         self._terminal = False
         self._last: _Done | None = None
+        self._mid_old: str | None = None  # the word being typed was fixed in its middle: the layout it began in
+        self._keep = False  # ... and that fix was undone: leave the word alone when it ends
         self._busy = False
         # Keys typed while a fix was being made: vk, Shift, and the Ctrl/Alt/Win held with it.
         self._held: list[tuple[int, bool, tuple[int, ...]]] = []
@@ -461,8 +466,9 @@ class AutoSwitcher(QObject):
     # --- settings ---
 
     def configure(self, enabled: bool, sensitivity: str, short_words: bool, skip_fullscreen: bool, excluded: list[str],
-                  terminal_answers: bool = True) -> None:
+                  terminal_answers: bool = True, mid_word: bool = True) -> None:
         with self._lock:
+            self.mid_word = mid_word
             self.enabled = enabled
             self.detector.sensitivity = SENSITIVITY.get(sensitivity, SENSITIVITY["normal"])
             self.detector.short_words = short_words
@@ -536,6 +542,11 @@ class AutoSwitcher(QObject):
             self.save_exceptions()
         log.info("learned a word to switch to %s", lang)
 
+    @property
+    def fixing(self) -> bool:
+        """A fix is being typed right now (it may be switching the layout)."""
+        return self._busy
+
     def note(self, word: str, why: str, fixed: bool = False) -> None:
         self.journal.append(Note(time.time(), word, why, fixed))
 
@@ -562,6 +573,8 @@ class AutoSwitcher(QObject):
         self._line.clear()
         self.session.reset()
         self._last = None
+        self._mid_old = None
+        self._keep = False
         self._origin = origin
 
     def _set_hooks(self) -> None:
@@ -696,7 +709,7 @@ class AutoSwitcher(QObject):
                 return False
             self._last = None
             self._append(Press(vk, _pressed(0x10), _caps(), layout))
-            return False
+            return self._mid_word(hwnd, layout)
 
     # --- the line ---
 
@@ -725,8 +738,32 @@ class AutoSwitcher(QObject):
                 i -= 1  # the space between two words
         return i
 
+    def _mid_word(self, hwnd: int, layout: str) -> bool:
+        """The key just added made the word MID_LEN letters long: if it clearly belongs to the other
+        layout, the key is held back and the worker types the word so far again. True to swallow it."""
+        if not (self.enabled and self.mid_word and self._window == "ok") or self._keep:
+            return False
+        word = self._line[self._word_start():]
+        if len(word) != MID_LEN or any(p.layout != layout for p in word):
+            return False
+        fix = self.session.start("".join(char_of(p, layout) for p in word), layout)
+        if fix is None:
+            return False
+        start = self._run_start(len(fix.keys))
+        run = self._line[start:]
+        if len(run) != fix.erase or render(run, layout) != fix.original or focused_is_password(hwnd):
+            self.session.reset()
+            return False
+        origin = self._origin if start == 0 else "edge"
+        self._line[start:] = [replace(p, layout=fix.layout) for p in run]
+        self._busy = True
+        self._jobs.put(("mid", fix, hwnd, layout, run, origin))
+        return True
+
     def _finish(self, vk: int) -> None:
         self._last = None
+        self._mid_old = None
+        self._keep = False
         if vk == VK_SPACE:
             self._append(Press(VK_SPACE, False, False, "en"))
         else:
@@ -734,16 +771,23 @@ class AutoSwitcher(QObject):
 
     def _backspace(self, hwnd: int) -> bool:
         done, self._last = self._last, None
-        if done is not None and self._line and self._line[-1].vk == VK_SPACE:
+        if done is not None and self._line and (done.mid or self._line[-1].vk == VK_SPACE):
             self._busy = True
             self._jobs.put(("undo", done, hwnd))
             return True
         if self._line:
             if self._line.pop().vk == VK_SPACE:
                 self.session.reset()  # editing the word before: the run is broken
+            self._erased()
         else:
             self._reset()  # erasing what came before the line: maybe into the middle of a word
         return False
+
+    def _erased(self) -> None:
+        """A character was erased: a word cut below MID_LEN letters is no longer the one fixed in its middle."""
+        if len(self._line) - self._word_start() < MID_LEN:
+            self._mid_old = None
+            self._keep = False
 
     def _delimiter(self, vk: int, hwnd: int, layout: str) -> bool:
         if self._answer(vk, hwnd, layout):
@@ -764,6 +808,14 @@ class AutoSwitcher(QObject):
             self._finish(vk)
             return False
         keys = "".join(char_of(p, layout) for p in word)
+        if self._keep:
+            # Its fix in the middle was undone: the same "no" for the whole word, until the app restarts.
+            self.detector.soft_exceptions = self.detector.soft_exceptions | {keys.lower()}
+            self.note(render(word, layout), "исправление на ходу отменено: не трогаю до перезапуска")
+            self.session.reset()
+            self._finish(vk)
+            return False
+        mid_old = self._mid_old
         fix = self._command(word, keys, layout) if vk == VK_SPACE else None
         if fix is None:
             fix = self.session.word(keys, layout)
@@ -776,6 +828,11 @@ class AutoSwitcher(QObject):
             self.session.reset()  # a new line or another field: the next words start afresh
         if fix is None:
             self._finish(vk)
+            if mid_old and vk == VK_SPACE:
+                # Fixed in its middle: a Backspace right after the space still takes the whole word back.
+                old = [replace(p, layout=mid_old) for p in word]
+                old_keys = "".join(char_of(p, mid_old) for p in old)
+                self._last = _Done(Fix(len(word), render(word, layout), layout, render(old, mid_old), [old_keys]), mid_old, old)
             return False
         start = self._run_start(len(fix.keys))
         run = self._line[start:]
@@ -844,6 +901,7 @@ class AutoSwitcher(QObject):
             self._line[start:] = [replace(p, layout=target) for p in run]
             self.session.reset()
             self._last = None
+            self._mid_old = None
             self._busy = True
             self._jobs.put(("flip", render(run, source), render(run, target), target, switch_layout, hwnd, whole_line,
                             learn))
@@ -902,6 +960,8 @@ class AutoSwitcher(QObject):
                             done, self._last = self._last, None
                         if done is not None:
                             self._undo(done, job[2])
+                elif job[0] == "mid":
+                    self._apply_mid(*job[1:])
                 elif job[0] == "answer":
                     self._type_answer(*job[1:])
                 elif job[0] == "flip":
@@ -961,6 +1021,35 @@ class AutoSwitcher(QObject):
             self._last = _Done(fix, layout, run) if delimiter == VK_SPACE else None
         self.corrected.emit(fix.original, fix.text)
 
+    def _apply_mid(self, fix: Fix, hwnd: int, layout: str, run: list[Press], origin: str) -> None:
+        """A word fixed at its MID_LEN-th letter. That letter was held back: the field has one less."""
+        last = run[-1]
+        why = self._field_says(fix.original[:-1], origin)
+        if not why and process_name(hwnd).lower() in BROWSERS and browser_password(hwnd):
+            why = "password"
+        if why:
+            self.note(fix.original + "…", {
+                "changed": "текст в поле не совпал с набранным (автодополнение, вставка)",
+                "middle": "слово начато до того, как курсор сюда попал",
+                "password": "поле пароля",
+            }[why])
+            shift = [0x10] if last.shift and not _pressed(0x10) else []
+            _send([_key(m) for m in shift] + [_key(last.vk), _key(last.vk, up=True)] + [_key(m, up=True) for m in shift])
+            with self._lock:
+                self.session.reset()
+                if why == "middle" and len(self._line) >= len(run):
+                    self._line[-len(run):] = run  # the line is right, only the word stays as typed
+                else:
+                    self._reset()
+            return
+        type_fix(fix.erase - 1, fix.text, None)
+        self._switch(hwnd, fix.layout)
+        self.note(f"{fix.original}… → {fix.text}…", "исправлено на ходу", fixed=True)
+        with self._lock:
+            self._last = _Done(fix, layout, run, mid=True)
+            self._mid_old = layout
+        self.corrected.emit(fix.original + "…", fix.text + "…")
+
     def _type_answer(self, erase: int, original: str, text: str, hwnd: int, delimiter: int) -> None:
         type_fix(erase, text, delimiter)
         self._switch(hwnd, "en")
@@ -987,23 +1076,33 @@ class AutoSwitcher(QObject):
     def _undo(self, done: _Done, hwnd: int) -> None:
         """Takes the fix and its space back, returns the old layout and remembers the words."""
         fix = done.fix
+        tail = "" if done.mid else " "
         before = uia.text_before_caret(len(fix.text) + 1)
-        if before is not None and not before.lower().endswith((fix.text + " ").lower()):
+        if before is not None and not before.lower().endswith((fix.text + tail).lower()):
             log.info("undo skipped: the text before the caret changed")
             type_fix(0, "", VK_BACK)  # the Backspace goes through as an ordinary one
             with self._lock:
                 self._reset()
             return
-        type_fix(len(fix.text) + 1, fix.original, None)
+        type_fix(len(fix.text) + len(tail), fix.original, None)
         self._switch(hwnd, done.old_layout)
         with self._lock:
             self.session.reset()
-            n = len(done.run) + 1
-            if len(self._line) >= n and self._line[-1].vk == VK_SPACE:
+            n = len(done.run) + len(tail)
+            if len(self._line) >= n and (done.mid or self._line[-1].vk == VK_SPACE):
                 self._line[-n:] = done.run  # the caret is back at the end of that word
+                self._mid_old = None
+                self._keep = done.mid
             else:
                 self._reset()
         keys = {k.lower() for k in fix.keys}
+        if done.mid:
+            # Only the beginning of a word: nothing to remember for good. The word itself is
+            # left alone when it ends (see _delimiter).
+            self.detector.soft_exceptions = self.detector.soft_exceptions | keys
+            self.note(fix.original + "…", "исправление на ходу отменено")
+            self.undone.emit(fix.original + "…", False)
+            return
         for_good = keys & self._struck
         # An accidental Backspace must not switch a word off for ever: the first undo keeps it
         # until the app restarts, a second one (after that) for good.
@@ -1087,12 +1186,14 @@ class AutoSwitcher(QObject):
             with self._lock:
                 # Replayed keys carry MARKER and skip the hook: keep the line in step here.
                 layout = self._fast_layout(self._hwnd)
+                self._last = None  # a key typed after the fix: Backspace no longer undoes it
                 if combo:
                     self._reset()  # a shortcut: the text may be anything now
                 elif vk == VK_BACK:
                     if self._line:
                         if self._line.pop().vk == VK_SPACE:
                             self.session.reset()
+                        self._erased()
                     else:
                         self._reset()
                 elif vk in (VK_RETURN, VK_TAB):
@@ -1101,6 +1202,8 @@ class AutoSwitcher(QObject):
                     self._reset()
                 elif vk == VK_SPACE:
                     self.session.reset()  # the word before it went unjudged
+                    self._mid_old = None
+                    self._keep = False
                     self._append(Press(VK_SPACE, False, False, layout))
                 elif vk in US_KEYS:
                     self._append(Press(vk, shift, _caps(), layout))

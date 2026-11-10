@@ -19,18 +19,22 @@ from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QMenu, QMessageBox, QSystemTrayIcon, QVBoxLayout, QWidget, QWidgetAction,
 )
 
-from . import __version__, elevation, theme, updater, winapi
+from . import __version__, elevation, textops, theme, updater, winapi
+from .applayout import AppLayouts
 from .autoswitch import AutoSwitcher
 from .config import EXCEPTIONS_FILE, LEARNED_FILE, Settings, set_autostart
 from .detector import Detector
 from .fixer import LayoutFixer
 from .history import History
 from .hotkeys import Hotkeys
+from .layout import RU_TO_EN
 from .icons import app_icon, line_icon, tray_icon
+from .indicator import Indicator
 from .journal_window import JournalWindow
 from .paths import APP_NAME, ASSETS_DIR, DATA_DIR, IMAGES_DIR, LOG_FILE
 from .popup import ClipPopup, corner_at
 from .settings_window import SettingsWindow, hotkey_text
+from .stats import Stats
 from .toast import Toast
 
 ERROR_ALREADY_EXISTS = 183
@@ -87,8 +91,18 @@ class HumanTypeApp:
             lambda part: self.update_action.setText(f"Скачиваю {self.update.version}… {part:.0%}"))
         self.settings = Settings.load()
         self.toast = Toast()
+        self.indicator = Indicator()
+        self.stats = Stats(DATA_DIR / "stats.json")
+        self.stats_saver = QTimer()
+        self.stats_saver.setInterval(15_000)
+        self.stats_saver.timeout.connect(self.stats.save)
+        self.stats_saver.start()
+        self._quiet_until = 0.0  # no layout indicator before this moment: a fix shows its own note
+        self.app_layouts = AppLayouts(DATA_DIR / "app_layouts.json")
+        self.app_layouts.changed.connect(self._on_layout_changed)
         self.history = History(DATA_DIR / "history.db", IMAGES_DIR)
         self.fixer = LayoutFixer(self.history, self.notify)
+        self.fixer.on_layout_fixed = lambda: self.stats.add("manual")
         self.popup = ClipPopup(self.history, self.notify)
         self.settings_window: SettingsWindow | None = None
         self.journal_window: JournalWindow | None = None
@@ -151,6 +165,8 @@ class HumanTypeApp:
         for hotkey, action in (
             (s.fix_word, self.fix_word),
             (s.fix_line, self.fix_line),
+            (s.fix_case, self.fix_case),
+            (s.fix_translit, self.fix_translit),
             (s.history_popup, self.open_history),
             (s.toggle_autoswitch, self.toggle_autoswitch),
         ):
@@ -173,7 +189,10 @@ class HumanTypeApp:
             settings.autoswitch_skip_fullscreen,
             settings.autoswitch_excluded,
             settings.autoswitch_terminal_answers,
+            settings.autoswitch_mid_word,
         )
+        self.app_layouts.remember = settings.app_layouts
+        self.app_layouts.set_active(settings.app_layouts or settings.layout_indicator)
         self.autoswitcher.set_flip_hotkeys(
             [(hotkey.mods, hotkey.vk) for hotkey in (settings.fix_word, settings.fix_line) if hotkey.is_set]
         )
@@ -192,6 +211,8 @@ class HumanTypeApp:
         s = settings
         self.tray.setToolTip(f"{APP_NAME}\n{hotkey_text(s.fix_word)} — раскладка\n{hotkey_text(s.history_popup)} — буфер")
         self.fix_action.setText(f"Исправить раскладку\t{hotkey_text(s.fix_word)}")
+        self.case_action.setText("Исправить регистр" + (f"\t{hotkey_text(s.fix_case)}" if s.fix_case.is_set else ""))
+        self.translit_action.setText("Транслит" + (f"\t{hotkey_text(s.fix_translit)}" if s.fix_translit.is_set else ""))
         self.history_action.setText(f"История буфера\t{hotkey_text(s.history_popup)}")
         return self._register_hotkeys()
 
@@ -203,7 +224,7 @@ class HumanTypeApp:
         # Free the hotkeys so the window can catch them while one is being changed.
         self.hotkeys.unregister_all()
         window = SettingsWindow(
-            self.settings, self.apply_settings, self.hotkeys.unregister_all, self.history, self.autoswitcher
+            self.settings, self.apply_settings, self.hotkeys.unregister_all, self.history, self.autoswitcher, self.stats
         )
         window.finished.connect(lambda _: self._register_hotkeys())
         self.settings_window = window
@@ -238,6 +259,8 @@ class HumanTypeApp:
         menu.addAction(line_icon("info"), "Почему не исправилось?", self.open_journal)
         menu.addSeparator()
         self.fix_action = menu.addAction(line_icon("keyboard", theme.ACCENT), "Исправить раскладку", self.fix_word)
+        self.case_action = menu.addAction(line_icon("type"), "Исправить регистр", self.fix_case)
+        self.translit_action = menu.addAction(line_icon("type"), "Транслит", self.fix_translit)
         self.history_action = menu.addAction(
             line_icon("clipboard", theme.ACCENT), "История буфера", lambda: self.popup.open_at_cursor(None)
         )
@@ -258,21 +281,44 @@ class HumanTypeApp:
             self.header.set_status("буфер на паузе", ok=False)
         else:
             auto = "авто вкл" if self.settings.autoswitch else "авто выкл"
-            self.header.set_status(f"работает · {auto} · в истории {len(self.history.items())}")
+            self.header.set_status(f"{auto} · исправлено сегодня: {self.stats.count('fixed', 1) + self.stats.count('manual', 1)}",
+                                   ok=self.settings.autoswitch)
 
     # --- layout ---
 
     def fix_word(self) -> None:
         # The word just typed is typed again from the keys the hook saw; anything else (a selection,
         # text typed before the caret last jumped) goes through the clipboard.
+        self._quiet()
         if not self.autoswitcher.flip(False, self.settings.switch_layout):
             self.autoswitcher.reset()
             self.fixer.fix()
 
     def fix_line(self) -> None:
+        self._quiet()
         if not self.autoswitcher.flip(True, self.settings.switch_layout):
             self.autoswitcher.reset()
             self.fixer.fix(whole_line=True)
+
+    def fix_case(self) -> None:
+        """пРИВЕТ → Привет; pressed again, the case goes round: привет → Привет → ПРИВЕТ."""
+        self.autoswitcher.reset()
+        self.fixer.fix(transform=textops.recase, mark="Aa")
+
+    def fix_translit(self) -> None:
+        """privet → привет and back, for the selection or the last word."""
+        self._quiet()
+        self.autoswitcher.reset()
+        self.fixer.fix(transform=textops.translit)
+
+    def _quiet(self, seconds: float = 1.0) -> None:
+        self._quiet_until = time.monotonic() + seconds
+
+    def _on_layout_changed(self, lang: str, hwnd: int) -> None:
+        # A fix says what it did in its own note; the indicator is for a layout changed by hand
+        # or brought back for the program.
+        if self.settings.layout_indicator and not self.autoswitcher.fixing and time.monotonic() >= self._quiet_until:
+            self.indicator.show_layout(lang, hwnd)
 
     def toggle_autoswitch(self) -> None:
         self.settings.autoswitch = not self.settings.autoswitch
@@ -288,13 +334,22 @@ class HumanTypeApp:
         self.tray.setIcon(tray_icon(on))  # grey while switched off
 
     def _on_corrected(self, before: str, after: str) -> None:
+        self._quiet()
+        self.stats.add("fixed")
         if self.settings.autoswitch_notify:
             self.toast.show_text(f"{before}  →  {after}", 1100)
 
     def _on_flipped(self, text: str, lang: str) -> None:
+        self._quiet()
+        self.stats.add("manual")
         self.notify(f"✓ {'РУ' if lang == 'ru' else 'EN'}: {text.strip()[:40]}")
 
     def _on_undone(self, word: str, for_good: bool) -> None:
+        self._quiet()
+        # Counted by the keys that type the word, as the exceptions are kept; a word undone in its
+        # middle ("ghbdt…") is only a beginning and is not counted as a word.
+        keys = word.translate(RU_TO_EN) if any("а" <= c.lower() <= "я" or c in "ёЁ" for c in word) else word
+        self.stats.add("undone", "" if word.endswith("…") or " " in word else keys.lower())
         if for_good:
             self.toast.show_text(f"Оставил «{word}» как есть и запомнил", 1600)
         else:
@@ -401,6 +456,8 @@ class HumanTypeApp:
         self.quit()
 
     def quit(self) -> None:
+        self.stats.save()
+        self.app_layouts.set_active(False)
         self.autoswitcher.stop()
         self.hotkeys.unregister_all()
         self.tray.hide()

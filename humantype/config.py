@@ -18,6 +18,7 @@ LEARNED_FILE = DATA_DIR / "autoswitch_learned.txt"  # words flipped by hand: swi
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "HumanType"
 VK_PAUSE = 0x13
+VK_SCROLL = 0x91  # Scroll Lock: the key beside Pause
 
 # Terminals and consoles: words are fixed there like anywhere else, and y/yes/n/no typed in
 # Russian are fixed on Enter even when the terminal is excluded.
@@ -70,6 +71,8 @@ class Hotkey:
 class Settings:
     fix_word: Hotkey = field(default_factory=lambda: Hotkey(0, VK_PAUSE))
     fix_line: Hotkey = field(default_factory=lambda: Hotkey(MOD_SHIFT, VK_PAUSE))
+    fix_case: Hotkey = field(default_factory=lambda: Hotkey(0, VK_SCROLL))  # пРИВЕТ → Привет
+    fix_translit: Hotkey = field(default_factory=lambda: Hotkey(MOD_SHIFT, VK_SCROLL))  # privet → привет
     history_popup: Hotkey = field(default_factory=lambda: Hotkey(MOD_CONTROL | MOD_SHIFT, ord("V")))
     history_limit: int = 100
     save_images: bool = True
@@ -77,11 +80,14 @@ class Settings:
     show_toasts: bool = True
     autostart: bool = field(default_factory=lambda: getattr(sys, "frozen", False))  # on by default once installed
     run_as_admin: bool = True  # so admin windows (an elevated terminal) are reached too
+    app_layouts: bool = True  # every program keeps its own layout
+    layout_indicator: bool = True  # RU / EN at the caret when the layout changes
     # automatic switching
     autoswitch: bool = True
     toggle_autoswitch: Hotkey = field(default_factory=lambda: Hotkey(MOD_ALT, VK_PAUSE))
     autoswitch_sensitivity: str = "normal"  # careful | normal | bold
     autoswitch_short_words: bool = True
+    autoswitch_mid_word: bool = True  # fix a word at its fifth letter, without waiting for the space
     autoswitch_skip_fullscreen: bool = True
     autoswitch_notify: bool = True
     autoswitch_terminal_answers: bool = True  # н, нуы, т, тщ in a terminal → y, yes, n, no on Enter

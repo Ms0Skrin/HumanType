@@ -26,6 +26,9 @@ try:  # Russian morphology: every form of every dictionary word, not only the fr
 except ImportError:
     pymorphy3 = None
 
+MID_LEN = 5  # letters after which a word still being typed may be switched
+MID_MIN_FREQ = 0.0  # ... if a word at least this common begins so in the other layout
+MID_NGRAM_GAP = 1.5  # ... and its letters fit that language this much better
 MORPH_FREQ = -1.0  # log10 per million given to a form only the morphology knows
 
 EN_LETTERS = set("abcdefghijklmnopqrstuvwxyz")
@@ -102,6 +105,15 @@ class NgramModel:
             n += 1
         return total / n
 
+    def prefix_score(self, start: str) -> float:
+        """The same for the beginning of a word still being typed: no end is counted."""
+        padded = f"^^{start}"
+        total = 0.0
+        for i in range(len(padded) - 2):
+            tri = padded[i : i + 3]
+            total += math.log2((self.counts.get(tri, 0.0) + self.k) / (self.context.get(tri[:2], 0.0) + self.k * self.vocab))
+        return total / (len(padded) - 2)
+
 
 def _mixed_case(core: str) -> bool:
     """camelCase and the like; `Нью-Йорк` and `NASA` are fine."""
@@ -114,6 +126,8 @@ def _mixed_case(core: str) -> bool:
 class Detector:
     def __init__(self, dict_dir: Path, morphology: bool = True) -> None:
         self.freq: dict[str, dict[str, float]] = {}
+        # How common the commonest word with this beginning is: for judging a word still being typed.
+        self.starts: dict[str, dict[str, float]] = {}
         self.models: dict[str, NgramModel] = {}
         for lang in ("ru", "en"):
             words: dict[str, float] = {}
@@ -124,6 +138,11 @@ class Detector:
                     word, count = line.split()
                     words[word] = round(math.log10(int(count) * scale), 2)
             self.freq[lang] = words
+            starts: dict[str, float] = {}
+            for word, freq in words.items():
+                if len(word) >= MID_LEN and freq > starts.get(word[:MID_LEN], -9.0):
+                    starts[word[:MID_LEN]] = freq
+            self.starts[lang] = starts
             counts = json.loads((dict_dir / f"{lang}.ngram").read_text(encoding="utf-8"))
             self.models[lang] = NgramModel(counts, LETTERS[lang])
         self.morph = pymorphy3.MorphAnalyzer(pymorphy3_dicts_ru.get_path()) if pymorphy3 and morphology else None
@@ -280,6 +299,36 @@ class Detector:
             return yes("letters fit the other language")
         return no("unsure")
 
+    def start_switch(self, keys: str, current: str) -> str | None:
+        """The first MID_LEN keys of a word still being typed: the text they should read in the other
+        layout, or None. Far stricter than `decide`: there is no whole word to look up yet, so the
+        other reading must begin a common word and the current one must begin none."""
+        if len(keys) != MID_LEN or any(c.isdigit() for c in keys):
+            return None
+        other = "ru" if current == "en" else "en"
+        cur = keys if current == "en" else keys.translate(EN_TO_RU)
+        alt = keys if other == "en" else keys.translate(EN_TO_RU)
+        low = alt.lower()
+        if alt[1:] != low[1:] or not all(c in LETTERS[other] for c in low):
+            return None  # capitals inside (an abbreviation, camelCase) or signs: wait for the whole word
+        lowered = keys.lower()
+        if any(word.startswith(lowered) for word in self.exceptions | self.soft_exceptions):
+            return None
+        if any(word.startswith(lowered) and lang == current for word, lang in self.learned.items()):
+            return None
+        if self.starts[other].get(low.replace("ё", "е"), -9.0) < MID_MIN_FREQ:
+            return None
+        cur_low = cur.lower()
+        if all(c in LETTERS[current] for c in cur_low):
+            if cur_low.replace("ё", "е") in self.starts[current] or cur_low in self.freq[current]:
+                return None
+            gap = self.models[other].prefix_score(low) - self.models[current].prefix_score(cur_low)
+            if gap < MID_NGRAM_GAP:
+                return None
+        elif cur_low.strip("".join(EDGE_PUNCT)) in self.freq[current]:
+            return None  # a short word with a comma or a dot after it (`Duke,`)
+        return alt
+
     def _dotted(self, r: Reading) -> bool:
         """Reads as dotted English (`file.txt`, `github.io`, `i.e`): every part is a word or short."""
         if r.lang != "en" or "." not in r.core:
@@ -339,22 +388,35 @@ class Session:
             return False
         return d.pending or alt.known or alt.ngram > self.detector._floor(target) + 1.0
 
+    def _fix(self, original: str, text: str, target: str, keys: str) -> Fix:
+        """The fix for a word that switches to `target`, together with the waiting words that follow it."""
+        fixed_keys = [keys]
+        # Walk back over the words still waiting, nearest first, while they agree.
+        for waiting in reversed(self.undecided):
+            if self.detector.is_exception(waiting.keys) or not self._can_follow(waiting.decision, target):
+                break
+            original = waiting.decision.current.text + waiting.delimiter + original
+            text = waiting.decision.other.text + waiting.delimiter + text
+            fixed_keys.insert(0, waiting.keys)
+        self.undecided.clear()
+        self.context = target
+        return Fix(len(original), text, target, original, fixed_keys)
+
+    def start(self, keys: str, layout: str) -> Fix | None:
+        """Called when a word still being typed reaches MID_LEN letters: the fix for what is typed
+        so far, if it clearly belongs to the other layout."""
+        text = self.detector.start_switch(keys, layout)
+        if text is None:
+            return None
+        original = keys if layout == "en" else keys.translate(EN_TO_RU)
+        return self._fix(original, text, "ru" if layout == "en" else "en", keys)
+
     def word(self, keys: str, layout: str, delimiter: str = " ") -> Fix | None:
         """Called when a word is finished, before its delimiter reaches the window."""
         d = self.detector.decide(keys, layout, self.context)
         self.last = d
         if d.switch:
-            original, text, fixed_keys = d.current.text, d.text, [keys]
-            # Walk back over the words still waiting, nearest first, while they agree.
-            for waiting in reversed(self.undecided):
-                if self.detector.is_exception(waiting.keys) or not self._can_follow(waiting.decision, d.target):
-                    break
-                original = waiting.decision.current.text + waiting.delimiter + original
-                text = waiting.decision.other.text + waiting.delimiter + text
-                fixed_keys.insert(0, waiting.keys)
-            self.undecided.clear()
-            self.context = d.target
-            return Fix(len(original), text, d.target, original, fixed_keys)
+            return self._fix(d.current.text, d.text, d.target, keys)
         if d.confident:
             self.undecided.clear()
             self.context = d.target
