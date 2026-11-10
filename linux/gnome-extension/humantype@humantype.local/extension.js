@@ -479,7 +479,7 @@ export default class HumanTypeExtension extends Extension {
         note.set_position(Math.round(x), Math.round(y));
         note.ease({opacity: 255, duration: 120, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
         this._note = note;
-        const ms = kind === 'fix' ? 1100 : 1600;
+        const ms = kind === 'layout' ? 750 : kind === 'fix' ? 1100 : 1600;
         this._noteTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
             this._noteTimeout = 0;
             note.ease({

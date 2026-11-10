@@ -109,7 +109,10 @@ class Box:
 detector = Detector(ROOT / "assets" / "dict")
 box = Box()
 saved: set[str] = set()
-engine = Engine(detector, box, Settings(excluded=("org.gnome.ptyxis", "jetbrains-*")), saved.update)
+# The fix at the fifth letter has its own checks at the end; the ones before them are for the fix at the space.
+engine = Engine(detector, box, Settings(excluded=("org.gnome.ptyxis", "jetbrains-*"), mid_word=False), saved.update)
+counts: list[tuple[str, str]] = []
+engine.count = lambda kind, word="": counts.append((kind, word))
 
 
 def event(code, value):
@@ -147,6 +150,9 @@ def reset(layout="en", **kw):
     box.caps = engine.caps = False
     engine.reset("edge")
     detector.exceptions = set()
+    detector.soft_exceptions = set()
+    detector.learned = {}
+    counts.clear()
     engine.set_enabled(True)
 
 
@@ -239,6 +245,59 @@ store.add_text("один"); store.add_text("два"); store.add_text("один")
 check("store: newest first, no repeats, limit", [i.text for i in store.items()], ["три", "один"])
 store.toggle_pin(store.items()[1].id); store.add_text("четыре"); store.add_text("пять")
 check("store: pinned stays", [i.text for i in store.items()], ["один", "пять", "четыре"])
+
+# a word flipped by hand is learned and switched by itself after
+reset(); type_("qwzx "); check("learn: an unknown word is left", box.s(), "qwzx ")
+reset(); type_("qwzx"); event(e.KEY_PAUSE, 1); event(e.KEY_PAUSE, 0); check("learn: flipped", box.s(), "йцяч")
+check("learn: remembered", detector.learned.get("qwzx"), "ru"); check("learn: counted", counts, [("manual", "")])
+learned = dict(detector.learned)
+reset(); detector.learned = learned; type_("qwzx "); check("learn: now switched by itself", box.s(), "йцяч ")
+type_(""); check("learn: Backspace unlearns", detector.learned.get("qwzx"), None)
+check("learn: the undo is counted with its word", counts, [("fixed", ""), ("undone", "qwzx")])
+
+# Scroll Lock: the case of the last word; Shift+Scroll Lock: its transliteration
+scroll = lambda: (event(e.KEY_SCROLLLOCK, 1), event(e.KEY_SCROLLLOCK, 0))  # noqa: E731
+reset("ru"); combo(e.KEY_CAPSLOCK); engine.caps = True; type_("Ghbdtn"); check("case: typed with Caps Lock", box.s(), "пРИВЕТ")
+combo(e.KEY_CAPSLOCK); engine.caps = False; scroll(); check("case: пРИВЕТ → Привет", box.s(), "Привет")
+scroll(); check("case: → ПРИВЕТ", box.s(), "ПРИВЕТ"); scroll(); check("case: → привет", box.s(), "привет")
+type_(" vbh "); check("case: typing goes on", box.s(), "привет мир ")
+reset(); type_("hello "); scroll(); check("case: the word just finished", box.s(), "Hello ")
+reset(); type_("privet"); combo(e.KEY_LEFTSHIFT, e.KEY_SCROLLLOCK); check("translit: privet → привет", box.s(), "привет")
+check("translit: layout", box.layout, "ru")
+combo(e.KEY_LEFTSHIFT, e.KEY_SCROLLLOCK); check("translit: and back", box.s(), "privet"); check("translit: layout back", box.layout, "en")
+reset(); type_("shchuka"); combo(e.KEY_LEFTSHIFT, e.KEY_SCROLLLOCK); check("translit: shchuka → щука", box.s(), "щука")
+type_(" b "); check("translit: typing goes on", box.s(), "щука и ")
+reset(); scroll(); check("case: nothing typed, nothing done", box.s(), "")
+
+# a word that clearly belongs to the other layout is fixed at its fifth letter, without waiting for the space
+engine.settings = Settings(excluded=("org.gnome.ptyxis", "jetbrains-*"))
+reset(); type_("ghbdt"); check("mid: fixed at the fifth letter", box.s(), "приве"); check("mid: layout", box.layout, "ru")
+type_("n rfr "); check("mid: the rest goes on in the new layout", box.s(), "привет как ")
+check("mid: counted once", counts, [("fixed", "")])
+reset(); type_("ghbdtn "); type_(""); check("mid: Backspace after the space takes the word back", box.s(), "ghbdtn")
+check("mid: layout back", box.layout, "en"); check("mid: the word is remembered", "ghbdtn" in detector.exceptions, True)
+type_(" ghbdtn "); check("mid: the undone word is left alone", box.s(), "ghbdtn ghbdtn ")
+reset(); type_("ntcnb"); check("mid: another word", box.s(), "тести"); type_("")
+check("mid: Backspace right after undoes", box.s(), "ntcnb"); check("mid: undo, layout back", box.layout, "en")
+type_("hjdfnm "); check("mid: the undone word stays when it ends", box.s(), "ntcnbhjdfnm ")
+check("mid: ... and is not remembered for good", detector.exceptions, set())
+type_("ntcnbhjdfnm "); check("mid: ... but is left alone the next time", box.s(), "ntcnbhjdfnm ntcnbhjdfnm ")
+reset(); type_("z nt,z k.,k."); check("mid: the short words before it are fixed too", box.s(), "я тебя люблю")
+reset(); type_("hello world "); check("mid: the right layout is untouched", box.s(), "hello world ")
+reset("ru"); type_("hello"); check("mid: ru → en", box.s(), "hello"); check("mid: ru → en layout", box.layout, "en")
+reset(); type_("Ghbdtn "); check("mid: capital letter", box.s(), "Привет ")
+reset(); type_("GHBDTN "); check("mid: all capitals wait for the space", box.s(), "ПРИВЕТ ")
+reset(); type_("ghbdtt"); type_("dtn "); check("mid: erased below five and typed again", box.s(), "привет ")
+type_(""); check("mid: no undo for a word typed again in the new layout", box.s(), "привет")
+reset(purpose="password"); type_("ghbdtn "); check("mid: password field", box.s(), "ghbdtn ")
+reset(app="jetbrains-pycharm"); type_("ghbdtn "); check("mid: excluded app", box.s(), "ghbdtn ")
+reset(switch_ok=False); type_("ghbdtn "); check("mid: layout switch fails: untouched", box.s(), "ghbdtn ")
+reset(); type_("abc"); event(e.KEY_LEFT, 1); event(e.KEY_LEFT, 0); box.text[:] = list("abc"); type_("ghbdtn ")
+check("mid: not in the middle of a word", box.s(), "abcghbdtn ")
+reset(); type_("ghb"); box.text.append("X"); type_("dtn "); check("mid: text changed behind us", box.s(), "ghbXdtn ")
+reset(); type_("ghbdtn"); event(e.KEY_PAUSE, 1); event(e.KEY_PAUSE, 0); check("mid: Pause flips the fixed word back", box.s(), "ghbdtn")
+engine.settings = Settings(excluded=("org.gnome.ptyxis", "jetbrains-*"), mid_word=False)
+reset(); type_("ghbdt"); check("mid: off in the settings", box.s(), "ghbdt")
 
 print("FAILS:", fails)
 sys.exit(1 if fails else 0)

@@ -8,6 +8,8 @@ A fix: the delimiter (space, Enter, Tab) is held back, the window is switched to
 the word is erased with Backspace and the same keys are pressed again, then the delimiter goes on.
 Pressing the keys again, instead of typing characters, works in every app and keeps Caps Lock and
 Shift exactly as the person meant them.
+A word that clearly belongs to the other layout is fixed at its fifth letter, without waiting for
+its end. Scroll Lock puts the case of the last word right, Shift+Scroll Lock transliterates it.
 """
 
 import fnmatch
@@ -18,8 +20,9 @@ from typing import Callable, Protocol
 
 from evdev import ecodes as e
 
-from ..detector import SENSITIVITY, Detector, Session
-from ..layout import EN_TO_RU
+from .. import textops
+from ..detector import MID_LEN, SENSITIVITY, Detector, Session
+from ..layout import EN_TO_RU, LANG_RU, RU_TO_EN
 from .keymap import ALTS, CTRLS, DELIMITERS, METAS, MODIFIERS, SHIFTS, US_KEYS, char_of
 
 log = logging.getLogger(__name__)
@@ -82,6 +85,7 @@ class _Undo:
     original: str
     text: str
     keys: list[str]
+    mid: bool = False  # fixed in the middle of the word: no space after it
 
 
 @dataclass
@@ -89,6 +93,9 @@ class Settings:
     autoswitch: bool = True
     sensitivity: str = "normal"
     short_words: bool = True
+    mid_word: bool = True  # fix a word at its fifth letter, without waiting for the space
+    app_layouts: bool = True  # every program keeps its own layout
+    layout_indicator: bool = True  # RU / EN at the caret when the layout changes (GNOME)
     skip_fullscreen: bool = True
     notify: bool = True
     excluded: tuple[str, ...] = ()
@@ -145,6 +152,11 @@ class Engine:
         self.out = out
         self.settings = settings or Settings()
         self.on_exceptions = on_exceptions or (lambda words: None)
+        self.on_learned: Callable[[], None] = lambda: None  # the learned words changed: save them
+        # For the statistics: "fixed" (by itself), "manual" (by a hotkey), "undone" and the word undone.
+        self.count: Callable[..., None] = lambda kind, word="": None
+        self._mid_old: str | None = None  # the word being typed was fixed in its middle: the layout it began in
+        self._keep = False  # ... and that fix was undone: leave the word alone when it ends
         self.layout: str | None = None  # kept up to date by the shell's signals
         self.caps = False
         self.down: set[int] = set()  # keys held, as the system sees them
@@ -177,6 +189,8 @@ class Engine:
         self.line.clear()
         self.session.reset()
         self._undo = None
+        self._mid_old = None
+        self._keep = False
         self._origin = origin
 
     def on_focus(self) -> None:
@@ -214,6 +228,10 @@ class Engine:
         if code == e.KEY_CAPSLOCK:
             self.caps = not self.caps  # the LED from the system corrects this right after
             return False
+        if code == e.KEY_SCROLLLOCK:
+            self._swallowed.add(code)
+            self._text_hotkey()
+            return True
         if code in MODIFIERS:
             return False
         if code == e.KEY_PAUSE:
@@ -238,9 +256,52 @@ class Engine:
         self.line.append(Press(code, bool(self.down & SHIFTS), self.caps, self.layout))
         if len(self.line) > MAX_LINE:
             del self.line[0]
-        return False
+        return self._mid_word(code)
 
     # --- words ---
+
+    def _mid_word(self, code: int) -> bool:
+        """The key just added made the word MID_LEN letters long: if it clearly belongs to the other
+        layout, the word so far is typed again in it, this key included. True to swallow the key."""
+        if not self.settings.autoswitch or not self.settings.mid_word or self._keep:
+            return False
+        word = self.line[self._word_start():]
+        if len(word) != MID_LEN or len({p.layout for p in word}) != 1:
+            return False
+        layout = word[0].layout
+        fix = self.session.start("".join(char_of(p.code, p.shift, p.caps, layout) or "" for p in word), layout)
+        if fix is None:
+            return False
+        start = self._run_start(len(fix.keys))
+        run = self.line[start:]
+        if len(run) != fix.erase or render(run, layout) != fix.original:
+            self.session.reset()
+            return False
+        on_screen = fix.original[:-1]  # this key has not reached the window yet
+        why = self._refuse(self.out.shell_state(on_screen), layout, on_screen, start == 0 and self._origin != "edge")
+        if why:
+            log.info("not fixing %r in the middle: %s", fix.original, why)
+            self.session.reset()
+            return False
+        if not self.out.set_layout(fix.layout):
+            self.session.reset()
+            return False
+        self.layout = fix.layout
+        self._swallowed.add(code)
+        self._retype(len(run) - 1, run)
+        self.line[start:] = [replace(p, layout=fix.layout) for p in run]
+        self._undo = _Undo(run, layout, fix.original, fix.text, fix.keys, mid=True)
+        self._mid_old = layout
+        self.count("fixed")
+        if self.settings.notify:
+            self.out.note("fix", f"{fix.original}…  →  {fix.text}…")
+        return True
+
+    def _erased(self) -> None:
+        """A character was erased: a word cut below MID_LEN letters is no longer the one fixed in its middle."""
+        if len(self.line) - self._word_start() < MID_LEN:
+            self._mid_old = None
+            self._keep = False
 
     def _word_start(self) -> int:
         for i in range(len(self.line) - 1, -1, -1):
@@ -331,9 +392,21 @@ class Engine:
             return False
         layout = layouts.pop()
         keys = "".join(char_of(p.code, p.shift, p.caps, layout) for p in word)
+        if self._keep:
+            # Its fix in the middle was undone: the same "no" for the whole word, until the service restarts.
+            self.detector.soft_exceptions = self.detector.soft_exceptions | {keys.lower()}
+            self.session.reset()
+            self._finish(code)
+            return False
+        mid_old = self._mid_old
         fix = self.session.word(keys, layout)
         if fix is None:
             self._finish(code)
+            if mid_old and code == SPACE:
+                # Fixed in its middle: a Backspace right after the space still takes the whole word back.
+                old = [replace(p, layout=mid_old) for p in word]
+                old_keys = "".join(char_of(p.code, p.shift, p.caps, mid_old) for p in old)
+                self._undo = _Undo(old, mid_old, render(old, mid_old), render(word, layout), [old_keys])
             return False
         start = self._run_start(len(fix.keys))
         run = self.line[start:]
@@ -361,12 +434,15 @@ class Engine:
         self.line[start:] = new_run
         self._finish(code)
         self._undo = _Undo(run, layout, fix.original, fix.text, fix.keys) if code == SPACE else None
+        self.count("fixed")
         if self.settings.notify:
             self.out.note("fix", f"{fix.original}  →  {fix.text}")
         return True
 
     def _finish(self, code: int) -> None:
         self._undo = None
+        self._mid_old = None
+        self._keep = False
         if code == SPACE:
             self.line.append(Press(SPACE, False, self.caps, self.layout or "en"))
             if len(self.line) > MAX_LINE:
@@ -428,17 +504,19 @@ class Engine:
 
     def _backspace(self) -> bool:
         undo, self._undo = self._undo, None
-        if undo is not None and self.line and self.line[-1].code == SPACE:
+        if undo is not None and self.line and (undo.mid or self.line[-1].code == SPACE):
             return self._do_undo(undo)
         if self.line:
             if self.line.pop().code == SPACE:
                 self.session.reset()  # editing the word before: the run is broken
+            self._erased()
         else:
             self.session.reset()
         return False
 
     def _do_undo(self, undo: _Undo) -> bool:
-        state = self.out.shell_state(undo.text + " ", ignore_case=True)
+        tail = "" if undo.mid else " "
+        state = self.out.shell_state(undo.text + tail, ignore_case=True)
         if state is not None and state.text_known and not state.matches:
             log.info("undo skipped: the text before the caret changed")
             return False  # let the Backspace through as an ordinary one
@@ -446,13 +524,28 @@ class Engine:
             return False
         self.layout = undo.old_layout
         self._swallowed.add(e.KEY_BACKSPACE)
-        self._retype(len(undo.run) + 1, undo.run)
-        del self.line[-(len(undo.run) + 1):]
+        self._retype(len(undo.run) + len(tail), undo.run)
+        del self.line[-(len(undo.run) + len(tail)):]
         self.line.extend(undo.run)
         self.session.reset()
+        self._mid_old = None
         added = {k.lower() for k in undo.keys}
+        if undo.mid:
+            # Only the beginning of a word: nothing to remember for good. The word itself is left
+            # alone when it ends (see _delimiter).
+            self._keep = True
+            self.detector.soft_exceptions = self.detector.soft_exceptions | added
+            self.count("undone")
+            if self.settings.notify:
+                self.out.note("undo", f"Оставил «{undo.original}…» как есть")
+            return True
         self.detector.exceptions = self.detector.exceptions | added
         self.on_exceptions(added)
+        if added & self.detector.learned.keys():  # undone: what was learned was wrong
+            self.detector.learned = {k: v for k, v in self.detector.learned.items() if k not in added}
+            self.on_learned()
+        for word in added:
+            self.count("undone", "" if " " in undo.original else word)
         if self.settings.notify:
             self.out.note("undo", f"Оставил «{undo.original}» как есть и запомнил")
         return True
@@ -493,5 +586,74 @@ class Engine:
         self.line[start:] = [replace(p, layout=target) for p in run]
         self.session.reset()
         self._undo = None
+        self._mid_old = None
+        self.count("manual")
+        if not whole_line and len(letters) == len(run):
+            self._learn("".join(char_of(p.code, p.shift, p.caps, source) or "" for p in run).lower(), target)
         text = render(run, target).strip()
         self.out.note("flip", f"{'РУ' if target == 'ru' else 'EN'}: {text[:40]}")
+
+    def _learn(self, keys: str, lang: str) -> None:
+        """The person flipped this word by hand: from now on it is switched by itself."""
+        if not keys or self.detector.learned.get(keys) == lang:
+            return
+        self.detector.learned = {**self.detector.learned, keys: lang}
+        self.detector.soft_exceptions = self.detector.soft_exceptions - {keys}
+        self.on_learned()
+        if keys in self.detector.exceptions:
+            self.detector.exceptions = self.detector.exceptions - {keys}
+            self.on_exceptions(set())
+        log.info("learned a word to switch to %s", lang)
+
+    def _text_hotkey(self) -> None:
+        """Scroll Lock: the case of the last word (пРИВЕТ → Привет, then round: привет → Привет → ПРИВЕТ);
+        Shift+Scroll Lock: its transliteration (privet → привет and back)."""
+        mods = self.down - {e.KEY_SCROLLLOCK}
+        if mods & (CTRLS | ALTS | METAS):
+            return
+        if mods & SHIFTS:
+            self._rewrite(textops.translit, "")
+        else:
+            self._rewrite(textops.recase, "Aa")
+
+    def _presses(self, text: str, layout: str) -> list[Press] | None:
+        """The keys that type `text` in `layout`, Caps Lock as it is now; None when some character has no key."""
+        presses = []
+        for c in text:
+            if c == " ":
+                presses.append(Press(SPACE, False, self.caps, layout))
+                continue
+            key = c if layout == "en" else c.translate(RU_TO_EN)
+            found = next((Press(code, shift, self.caps, layout) for code in US_KEYS for shift in (False, True)
+                          if char_of(code, shift, self.caps, layout) == key), None)
+            if found is None or render([found], layout) != c:
+                return None
+            presses.append(found)
+        return presses
+
+    def _rewrite(self, transform, mark: str) -> None:
+        """Types the word being typed (or the one just finished) again as `transform` makes it."""
+        self._sync()
+        start = self._run_start(1)
+        run = self.line[start:]
+        letters = [p for p in run if p.code != SPACE]
+        if not letters or any(p.layout != letters[-1].layout for p in letters):
+            self.out.note("flip", "Нечего менять")
+            return
+        source = letters[-1].layout
+        text = render(run, source)
+        new, lang = transform(text)
+        target = source if lang is None else ("ru" if lang == LANG_RU else "en")
+        presses = self._presses(new, target) if new != text else None
+        if presses is None:
+            self.out.note("flip", "Нечего менять")
+            return
+        if target != source and not self.out.set_layout(target):
+            return
+        self.layout = target
+        self._retype(len(run), presses)
+        self.line[start:] = presses
+        self.session.reset()
+        self._undo = None
+        self._mid_old = None
+        self.out.note("flip", f"{mark or ('РУ' if target == 'ru' else 'EN')}: {new.strip()[:40]}")

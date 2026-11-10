@@ -1,4 +1,5 @@
-"""Settings in ~/.config/humantype: settings.json and the words never to switch, exceptions.txt."""
+"""Settings in ~/.config/humantype: settings.json, the words never to switch (exceptions.txt) and
+the words always to switch (learned.txt); what the service gathers itself is in ~/.local/share/humantype."""
 
 import json
 import logging
@@ -13,6 +14,9 @@ log = logging.getLogger(__name__)
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "humantype"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 EXCEPTIONS_FILE = CONFIG_DIR / "exceptions.txt"
+LEARNED_FILE = CONFIG_DIR / "learned.txt"  # words flipped by hand with Pause: "keys ru" or "keys en" a line
+# The clipboard history (history.db and its pictures), the statistics, the layouts of the programs.
+DATA_DIR = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "humantype"
 
 # Apps where automatic switching stays off: app ids and window classes, lowercase, * allowed.
 # Terminals mostly say so themselves (the field's purpose is "terminal"); these are for the rest.
@@ -67,3 +71,22 @@ def save_exceptions(words: set[str]) -> None:
     tmp = EXCEPTIONS_FILE.with_suffix(".tmp")
     tmp.write_text("\n".join(sorted(words)) + "\n", encoding="utf-8")
     tmp.replace(EXCEPTIONS_FILE)
+
+
+def load_learned() -> dict[str, str]:
+    learned: dict[str, str] = {}
+    try:
+        for line in LEARNED_FILE.read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1] in ("ru", "en"):
+                learned[parts[0].lower()] = parts[1]
+    except FileNotFoundError:
+        pass
+    return learned
+
+
+def save_learned(learned: dict[str, str]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = LEARNED_FILE.with_suffix(".tmp")
+    tmp.write_text("".join(f"{keys} {lang}\n" for keys, lang in sorted(learned.items())), encoding="utf-8")
+    tmp.replace(LEARNED_FILE)

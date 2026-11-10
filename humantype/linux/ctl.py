@@ -1,9 +1,10 @@
 """The app menu entry: turns automatic switching on and off, starting the service if it is not running;
 `update` installs the newest release (linux/install.sh --release) and says how it went;
-`export-words FILE` and `import-words FILE` carry the exceptions to and from another computer
-(the file is the one the Windows settings save and load).
+`export-words FILE` and `import-words FILE` carry the exceptions and the learned words to and from
+another computer (the file is the one the Windows settings save and load); `stats` tells how much
+was fixed.
 
-    python -m humantype.linux.ctl [toggle|on|off|update|export-words FILE|import-words FILE]
+    python -m humantype.linux.ctl [toggle|on|off|update|stats|export-words FILE|import-words FILE]
 """
 
 import subprocess
@@ -67,13 +68,12 @@ def update() -> int:
 
 
 def words(action: str, path: str) -> int:
-    """The exceptions as a file for another computer, or taken from one. Linux keeps no learned
-    words yet: those in a file from Windows are left out, and none are written."""
+    """The exceptions and the learned words as a file for another computer, or taken from one."""
     from .. import wordlists
     from . import config
 
     if action == "export-words":
-        Path(path).write_text(wordlists.dump(config.load_exceptions(), {}), encoding="utf-8")
+        Path(path).write_text(wordlists.dump(config.load_exceptions(), config.load_learned()), encoding="utf-8")
         print(f"saved to {path}")
         return 0
     try:
@@ -81,9 +81,34 @@ def words(action: str, path: str) -> int:
     except (OSError, ValueError) as error:
         print(f"cannot read {path}: {error}", file=sys.stderr)
         return 1
-    have = config.load_exceptions()
-    config.save_exceptions(have | exceptions)  # the service sees the file change and reads it again
-    print(f"exceptions added: {len(exceptions - have)}" + (f"; learned words skipped: {len(learned)}" if learned else ""))
+    have, have_learned = config.load_exceptions(), config.load_learned()
+    new_learned = {k: v for k, v in learned.items() if have_learned.get(k) != v and k not in exceptions | have}
+    # The service sees the files change and reads them again.
+    config.save_exceptions(have | exceptions)
+    config.save_learned({k: v for k, v in {**have_learned, **new_learned}.items() if k not in exceptions})
+    print(f"exceptions added: {len(exceptions - have)}; learned words added: {len(new_learned)}")
+    return 0
+
+
+def stats() -> int:
+    """How much was fixed: today, in a week, in all; and the words whose fix is undone most often."""
+    from ..layout import EN_TO_RU
+    from ..stats import Stats
+    from . import config
+
+    s = Stats(config.DATA_DIR / "stats.json")  # the service saves it twice a minute
+    fixed = lambda days: s.count("fixed", days) + s.count("manual", days)  # noqa: E731
+    print(f"Исправлено сегодня: {fixed(1)}   за 7 дней: {fixed(7)}   за всё время: {fixed(None)}")
+    print(f"Из них вручную (Pause): {s.count('manual')}   отменено Backspace: {s.count('undone')}")
+    known = config.load_exceptions()
+    for day, count in s.last_days(14):
+        manual = dict(s.last_days(14, "manual")).get(day, 0)
+        print(f"  {day[8:10]}.{day[5:7]}  {'█' * min(60, count + manual)} {count + manual}")
+    top = s.top_undone(15)
+    if top:
+        print("Чаще всего отменяете (✓ — уже в исключениях):")
+        for keys, n in top:
+            print(f"  {'✓' if keys in known else ' '} {keys}  ·  {keys.translate(EN_TO_RU)}  ·  {n}")
     return 0
 
 
@@ -91,6 +116,8 @@ def main() -> int:
     action = sys.argv[1] if len(sys.argv) > 1 else "toggle"
     if action == "update":
         return update()
+    if action == "stats":
+        return stats()
     if action in ("export-words", "import-words"):
         if len(sys.argv) < 3:
             print(f"usage: python -m humantype.linux.ctl {action} FILE", file=sys.stderr)
