@@ -1,5 +1,5 @@
 #!/bin/bash
-# Installs HumanType for the current user on GNOME, KDE Plasma, Hyprland, Sway or any desktop on X11:
+# Installs HumanType for the current user on GNOME, KDE Plasma, Hyprland, Sway, niri or any desktop on X11:
 #   1. the udev rule that lets you read the keyboard (asks for sudo, once);
 #   2. on GNOME, the Shell extension (active after you log out and in again);
 #   3. the menu entry and icons;
@@ -21,7 +21,7 @@ RULE=/etc/udev/rules.d/70-humantype.rules
 DESKTOP="$DATA/applications/humantype.desktop"
 ICONS="$DATA/icons/hicolor/scalable/apps"
 # What the service needs from the session; desktops that do not hand it to systemd get it here.
-SESSION_VARS="DISPLAY XAUTHORITY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE SWAYSOCK HYPRLAND_INSTANCE_SIGNATURE"
+SESSION_VARS="DISPLAY XAUTHORITY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE SWAYSOCK HYPRLAND_INSTANCE_SIGNATURE NIRI_SOCKET"
 START_SH="systemctl --user import-environment $SESSION_VARS; systemctl --user restart humantype.service"
 START_CMD="sh -c '$START_SH'"  # for compositor configs; desktop entries quote with " instead
 
@@ -78,7 +78,7 @@ python3 -c 'import evdev, gi; gi.require_version("Gio", "2.0")' 2>/dev/null || {
 KIND=$(PYTHONPATH="$APP_DIR" python3 -c 'from humantype.linux.desktops import detect; print(detect())')
 case "$KIND" in
     gnome) echo "desktop: GNOME" ;;
-    kde|hyprland|sway|x11)
+    kde|hyprland|sway|niri|x11)
         echo "desktop: $KIND"
         python3 -c 'import gi; gi.require_version("Atspi", "2.0")' 2>/dev/null || {
             echo "  (optional) for password and text checks install AT-SPI:"
@@ -86,7 +86,7 @@ case "$KIND" in
         } ;;
     *)
         echo "This desktop is not supported yet (XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-?}, ${XDG_SESSION_TYPE:-?})."
-        echo "Supported: GNOME, KDE Plasma, Hyprland, Sway, and any desktop on X11."
+        echo "Supported: GNOME, KDE Plasma, Hyprland, Sway, niri, and any desktop on X11."
         exit 1 ;;
 esac
 
@@ -167,6 +167,14 @@ case "$KIND" in
     hyprland)
         echo "Done: HumanType is running. Hyprland does not read autostart entries: add to hyprland.conf"
         echo "  exec-once = $START_CMD" ;;
+    niri)
+        # niri-session starts graphical-session.target and hands systemd its variables; plain `niri` does neither.
+        if systemctl --user is-active --quiet graphical-session.target; then
+            echo "Done: HumanType is running and starts with niri-session at login."
+        else
+            echo "Done: HumanType is running. niri was started without niri-session: add to ~/.config/niri/config.kdl"
+            echo "  spawn-sh-at-startup \"$START_SH\""
+        fi ;;
     sway)
         echo "Done: HumanType is running. Sway does not read autostart entries: add to ~/.config/sway/config"
         echo "  exec $START_CMD" ;;

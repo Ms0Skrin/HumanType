@@ -7,7 +7,7 @@
 [![Сборка](https://img.shields.io/github/actions/workflow/status/Ms0Skrin/HumanType/build.yml?branch=main&style=for-the-badge&label=%D1%81%D0%B1%D0%BE%D1%80%D0%BA%D0%B0&labelColor=0F172A&color=38BDF8)](https://github.com/Ms0Skrin/HumanType/actions/workflows/build.yml)
 [![Релиз](https://img.shields.io/github/v/release/Ms0Skrin/HumanType?style=for-the-badge&label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7&labelColor=0F172A&color=38BDF8)](https://github.com/Ms0Skrin/HumanType/releases/latest)
 ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-38BDF8?style=for-the-badge&logo=windows&logoColor=white&labelColor=0F172A)
-![Linux](https://img.shields.io/badge/Linux-GNOME%20%7C%20KDE%20%7C%20Hyprland%20%7C%20Sway%20%7C%20X11-38BDF8?style=for-the-badge&logo=linux&logoColor=white&labelColor=0F172A)
+![Linux](https://img.shields.io/badge/Linux-GNOME%20%7C%20KDE%20%7C%20Hyprland%20%7C%20Sway%20%7C%20niri%20%7C%20X11-38BDF8?style=for-the-badge&logo=linux&logoColor=white&labelColor=0F172A)
 [![MIT](https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-MIT-38BDF8?style=for-the-badge&labelColor=0F172A)](LICENSE)
 
 **Пишешь — и не думаешь о раскладке.**<br>
@@ -72,12 +72,13 @@
 | **KDE Plasma** 5 / 6 | ✅ D-Bus | ✅ скрипт KWin | ✅ AT-SPI | трей |
 | **Hyprland** | ✅ IPC | ✅ | ✅ AT-SPI | waybar |
 | **Sway** | ✅ IPC | ✅ | ✅ AT-SPI | waybar |
+| **niri** | ✅ IPC | ✅ | ✅ AT-SPI | waybar и другие панели с треем |
 | **X11**: Xfce, Cinnamon, MATE, LXQt, i3… | ✅ XKB | ✅ EWMH | ✅ AT-SPI | трей |
 
 Установщик сам определит оболочку.
 
 > [!IMPORTANT]
-> На живом GNOME всё проверено сквозным тестом. KDE, Hyprland, Sway и X11 пока проверены только на поддельных серверах — если что-то не так, пришлите вывод `journalctl --user -u humantype` в Issues.
+> На живом GNOME всё проверено сквозным тестом, niri — на живом сеансе (26.04). KDE, Hyprland, Sway и X11 пока проверены только на поддельных серверах — если что-то не так, пришлите вывод `journalctl --user -u humantype` в Issues.
 
 ```bash
 # зависимости — Arch / CachyOS
@@ -96,6 +97,7 @@ git clone https://github.com/Ms0Skrin/HumanType.git ~/.local/share/humantype-app
 - **GNOME:** ставится ещё и расширение — **выйдите из сеанса и войдите снова**, значок появится справа вверху.
 - **KDE, Xfce, Cinnamon, MATE:** всё запускается сразу, значок — в трее. Клик по значку включает и выключает.
 - **Hyprland, Sway:** установщик покажет одну строку для `hyprland.conf` / `sway/config`, чтобы служба стартовала при входе.
+- **niri:** при входе через `niri-session` (так запускают niri экраны входа) служба стартует сама. Если niri запускается командой `niri` без сессии, установщик покажет строку для `config.kdl`.
 
 <details>
 <summary><b>Обновить, удалить, посмотреть журнал</b></summary>
@@ -131,13 +133,13 @@ python3 -m humantype.linux.ctl import-words ~/humantype-words.json
 flowchart LR
     K[⌨️ Клавиатура] --> D[Служба HumanType]
     D -- клавиши --> T[Виртуальная клавиатура] --> A[Приложение]
-    D <-- раскладка, тип поля --> S[GNOME · KDE · Hyprland · Sway · X11 · Win32]
+    D <-- раскладка, тип поля --> S[GNOME · KDE · Hyprland · Sway · niri · X11 · Win32]
     D --> E{Слово в чужой<br>раскладке?}
     E -- да --> F[Стереть → переключить<br>раскладку → перепечатать]
 ```
 
 - **Windows:** низкоуровневый хук клавиатуры, ввод через `SendInput`, поля паролей распознаются через MSAA, текст перед курсором — через UI Automation, и только в момент исправления.
-- **Linux:** служба читает клавиатуру через `evdev` и передаёт клавиши дальше через виртуальную клавиатуру `uinput`. На GNOME раскладку, тип поля и текст перед курсором сообщает расширение GNOME Shell; в KDE — D-Bus и скрипт KWin, в Hyprland и Sway — их IPC, в X11 — XKB; тип поля и текст — через AT-SPI. Сам текст никуда не отправляется: служба лишь сверяет, совпадает ли он с набранным.
+- **Linux:** служба читает клавиатуру через `evdev` и передаёт клавиши дальше через виртуальную клавиатуру `uinput`. На GNOME раскладку, тип поля и текст перед курсором сообщает расширение GNOME Shell; в KDE — D-Bus и скрипт KWin, в Hyprland, Sway и niri — их IPC, в X11 — XKB; тип поля и текст — через AT-SPI. Сам текст никуда не отправляется: служба лишь сверяет, совпадает ли он с набранным.
 - Если служба зависнет, через 3 секунды она отпускает клавиатуру и перезапускается.
 
 > [!NOTE]
@@ -148,7 +150,7 @@ flowchart LR
 ```bash
 python tests/linux_engine.py     # движок Linux, без устройств
 python tests/linux_e2e.py        # живой GNOME: виртуальная клавиатура печатает в тестовое окно
-dbus-run-session -- python tests/linux_desktops.py   # KDE, Hyprland, Sway на поддельных серверах
+dbus-run-session -- python tests/linux_desktops.py   # KDE, Hyprland, Sway, niri на поддельных серверах
 python tests/sim_autoswitch.py   # логика Windows-версии с заглушками Win32
 python tests/units.py            # детектор «на ходу», транслит, регистр, файл слов, статистика
 python tests/uia_probe.py        # Windows: UI Automation читает текст перед курсором в окне Qt

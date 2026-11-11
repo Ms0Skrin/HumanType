@@ -1,4 +1,4 @@
-"""The desktop backends against fake compositors: a fake sway IPC socket, fake Hyprland sockets and
+"""The desktop backends against fake compositors: a fake sway IPC socket, fake Hyprland sockets, a fake niri socket and
 a fake KDE keyboard service on a private D-Bus. No real desktop needed.
 
     dbus-run-session -- python tests/linux_desktops.py
@@ -116,10 +116,11 @@ check("text: empty field", text_check("", "abc", False)["common_edge"], True)
 for env, want in [({"XDG_CURRENT_DESKTOP": "KDE"}, "kde"), ({"XDG_CURRENT_DESKTOP": "ubuntu:GNOME"}, "gnome"),
                   ({"XDG_CURRENT_DESKTOP": "Hyprland"}, "hyprland"), ({"SWAYSOCK": "/x"}, "sway"),
                   ({"XDG_CURRENT_DESKTOP": "XFCE", "XDG_SESSION_TYPE": "x11", "DISPLAY": ":0"}, "x11"),
-                  ({"XDG_CURRENT_DESKTOP": "niri", "WAYLAND_DISPLAY": "wayland-1"}, "")]:
+                  ({"XDG_CURRENT_DESKTOP": "niri", "WAYLAND_DISPLAY": "wayland-1"}, "niri"),
+                  ({"XDG_CURRENT_DESKTOP": "weston", "WAYLAND_DISPLAY": "wayland-1"}, "")]:
     saved = dict(os.environ)
     for k in ("XDG_CURRENT_DESKTOP", "HYPRLAND_INSTANCE_SIGNATURE", "SWAYSOCK", "XDG_SESSION_TYPE", "DISPLAY",
-              "WAYLAND_DISPLAY", "HUMANTYPE_DESKTOP"):
+              "WAYLAND_DISPLAY", "HUMANTYPE_DESKTOP", "NIRI_SOCKET"):
         os.environ.pop(k, None)
     os.environ.update(env)
     check(f"detect {env}", detect(), want)
@@ -271,6 +272,107 @@ for c in hfake.events:
     c.sendall(b"activelayout>>kb,English (US)\nactivewin")  # a line split across two reads
 pump(0.2)
 check("hyprland: line split across reads", calls.layouts[-1], "en")
+
+# --- niri ---
+
+
+class FakeNiri:
+    """niri's socket: one JSON request per line, one reply; "EventStream" turns a connection into events."""
+
+    def __init__(self, path):
+        self.index = 0
+        self.names = ["English (US)", "Russian"]
+        self.requests = []
+        self.subscribers = []
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server.bind(path)
+        self.server.listen()
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def layouts(self):
+        return {"names": self.names, "current_idx": self.index}
+
+    def serve(self):
+        while True:
+            conn, _ = self.server.accept()
+            threading.Thread(target=self.client, args=(conn,), daemon=True).start()
+
+    def client(self, conn):
+        line = conn.makefile().readline()
+        request = json.loads(line)
+        self.requests.append(request)
+        if request == "KeyboardLayouts":
+            reply = {"Ok": {"KeyboardLayouts": self.layouts()}}
+        elif request == "Outputs":
+            reply = {"Ok": {"Outputs": {"DP-1": {"name": "DP-1", "logical": {"x": 0, "y": 0, "width": 2560,
+                                                                             "height": 1440, "scale": 1.0}}}}}
+        elif request == "EventStream":
+            conn.sendall(b'{"Ok":"Handled"}\n')
+            self.subscribers.append(conn)
+            self.event({"WorkspacesChanged": {"workspaces": [{"id": 1, "idx": 1, "output": "DP-1"}]}})
+            self.event({"WindowsChanged": {"windows": [window(5, "kitty", 50, True)]}})
+            self.event({"KeyboardLayoutsChanged": {"keyboard_layouts": self.layouts()}})
+            return
+        elif isinstance(request, dict) and "Action" in request:
+            self.index = request["Action"]["SwitchLayout"]["layout"]["Index"]
+            reply = {"Ok": "Handled"}
+            self.event({"KeyboardLayoutSwitched": {"idx": self.index}})
+        else:
+            reply = {"Err": "unknown request"}
+        conn.sendall((json.dumps(reply) + "\n").encode())
+        conn.close()
+
+    def event(self, obj):
+        for conn in self.subscribers:
+            conn.sendall((json.dumps(obj) + "\n").encode())
+
+
+def window(wid, app, pid, focused, size=(1200, 800)):
+    return {"id": wid, "app_id": app, "pid": pid, "workspace_id": 1, "is_focused": focused, "is_floating": True,
+            "layout": {"window_size": list(size), "tile_pos_in_workspace_view": [10.0, 10.0]}}
+
+
+nfake = FakeNiri(str(tmp / "niri.sock"))
+os.environ["NIRI_SOCKET"] = str(tmp / "niri.sock")
+from humantype.linux.desktops.niri import Niri  # noqa: E402
+
+calls = Calls()
+niri = Niri(*calls.args())
+pump(1.0, until=lambda: niri.present and niri.app)
+check("niri: connected", niri.present, True)
+check("niri: layout", niri.layout(), "en")
+check("niri: focused window from the stream", (niri.app, niri.pid, niri.fullscreen), ("kitty", 50, False))
+check("niri: switch to ru", niri.set_layout("ru"), True)
+check("niri: compositor index", nfake.index, 1)
+check("niri: the new layout at once, before the event", niri.layout(), "ru")
+pump(0.3, until=lambda: calls.layouts[-1:] == ["ru"])
+check("niri: layout event", calls.layouts[-1], "ru")
+check("niri: no German", niri.set_layout("de"), False)
+nfake.event({"WindowOpenedOrChanged": {"window": window(6, "steam_app_1", 70, True, (2560, 1440))}})
+pump(0.3, until=lambda: niri.app == "steam_app_1")
+check("niri: new window takes the focus, fullscreen", (niri.app, niri.pid, niri.fullscreen),
+      ("steam_app_1", 70, True))
+nfake.event({"WindowLayoutsChanged": {"changes": [[6, {"window_size": [1600, 900]}]]}})
+pump(0.3, until=lambda: not niri.fullscreen)
+check("niri: left fullscreen", niri.fullscreen, False)
+nfake.event({"WindowFocusChanged": {"id": 5}})
+pump(0.3, until=lambda: niri.app == "kitty")
+check("niri: focus back", (niri.app, niri.pid), ("kitty", 50))
+asked = len(nfake.requests)
+for i in range(50):  # dragging a window: the stream alone, no requests back
+    nfake.event({"WindowLayoutsChanged": {"changes": [[5, {"window_size": [1200 + i, 800]}]]}})
+pump(0.3)
+check("niri: layout storm asks nothing", len(nfake.requests) - asked, 0)
+for conn in nfake.subscribers:
+    conn.sendall(b'{"KeyboardLayoutSwitched":{"idx":0}}\n{"KeyboardLayout')  # a line split across two reads
+    conn.sendall(b'Switched":{"idx":1}}\n')
+pump(0.3, until=lambda: calls.layouts[-1:] == ["ru"])
+check("niri: line split across reads", (calls.layouts[-2:], niri.layout()), (["en", "ru"], "ru"))
+for conn in nfake.subscribers:
+    conn.close()
+pump(0.3, until=lambda: not niri.present)
+check("niri: compositor gone", (niri.present, calls.vanished), (False, 1))
+os.environ.pop("NIRI_SOCKET")
 
 # --- KDE ---
 

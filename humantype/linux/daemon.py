@@ -548,7 +548,7 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(levelname)s %(name)s: %(message)s")
     if not desktops.detect():
-        log.error("this desktop is not supported: GNOME, KDE Plasma, Hyprland, Sway or any desktop on X11 "
+        log.error("this desktop is not supported: GNOME, KDE Plasma, Hyprland, Sway, niri or any desktop on X11 "
                   "(XDG_CURRENT_DESKTOP=%r); HUMANTYPE_DESKTOP=... picks one by hand",
                   os.environ.get("XDG_CURRENT_DESKTOP", ""))
         return 2

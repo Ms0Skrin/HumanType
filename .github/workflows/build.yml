@@ -34,7 +34,7 @@ jobs:
         run: cp linux/gnome-extension/humantype@humantype.local/extension.js /tmp/extension.mjs && node --check /tmp/extension.mjs
 
   desktops:
-    # The KDE, Hyprland, Sway backends against fake compositors; system Python for PyGObject.
+    # The KDE, Hyprland, Sway, niri backends against fake compositors; system Python for PyGObject.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

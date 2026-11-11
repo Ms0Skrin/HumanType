@@ -1,7 +1,7 @@
 """The desktop the service runs in: who switches the layout and tells about the focus.
 
-GNOME has its own extension (humantype.linux.shell); KDE Plasma, Hyprland, Sway and any desktop
-on X11 have a backend here. HUMANTYPE_DESKTOP=gnome|kde|hyprland|sway|x11 overrides the guess.
+GNOME has its own extension (humantype.linux.shell); KDE Plasma, Hyprland, Sway, niri and any desktop
+on X11 have a backend here. HUMANTYPE_DESKTOP=gnome|kde|hyprland|sway|niri|x11 overrides the guess.
 """
 
 import os
@@ -20,6 +20,8 @@ def detect() -> str:
         return "hyprland"
     if "sway" in names or os.environ.get("SWAYSOCK"):
         return "sway"
+    if "niri" in names or os.environ.get("NIRI_SOCKET"):
+        return "niri"
     if os.environ.get("XDG_SESSION_TYPE") == "x11" or (os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")):
         return "x11"
     return ""
@@ -35,6 +37,8 @@ def connect(kind: str, on_layout, on_focus, on_appeared, on_vanished):
         from .hyprland import Hyprland as cls
     elif kind == "sway":
         from .sway import Sway as cls
+    elif kind == "niri":
+        from .niri import Niri as cls
     elif kind == "x11":
         from .x11 import X11 as cls
     else:

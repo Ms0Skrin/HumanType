@@ -1,5 +1,5 @@
 """The tray icon outside GNOME: a StatusNotifierItem, which KDE Plasma, Xfce, Cinnamon, LXQt and
-waybar (Sway, Hyprland) show. A click turns automatic switching on and off; the icon is grey
+waybar (Sway, Hyprland, niri) show. A click turns automatic switching on and off; the icon is grey
 while it is off. (GNOME has the extension's own icon in the top bar instead.)"""
 
 import logging
