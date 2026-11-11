@@ -97,6 +97,7 @@ class Settings:
     app_layouts: bool = True  # every program keeps its own layout
     layout_indicator: bool = True  # RU / EN at the caret when the layout changes (GNOME)
     skip_fullscreen: bool = True
+    skip_terminals: bool = True  # False: fix words in terminals too (their [y/N] answers still work)
     notify: bool = True
     excluded: tuple[str, ...] = ()
     terminal_answers: bool = True  # y/yes/n/no typed in Russian in a terminal
@@ -457,7 +458,8 @@ class Engine:
             return "GNOME Shell extension does not answer"
         if state.layout != layout:
             return f"the layout is {state.layout} now"
-        if state.purpose in SKIP_PURPOSES or state.private:
+        skip = SKIP_PURPOSES if self.settings.skip_terminals else SKIP_PURPOSES - {"terminal"}
+        if state.purpose in skip or state.private:
             return f"a {state.purpose or 'private'} field"
         if self.settings.skip_fullscreen and state.fullscreen:
             return "full screen"
