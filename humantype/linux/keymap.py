@@ -26,6 +26,9 @@ US_KEYS.update(
 RU_LETTER_KEYS = {
     e.KEY_SEMICOLON, e.KEY_COMMA, e.KEY_DOT, e.KEY_GRAVE, e.KEY_LEFTBRACE, e.KEY_RIGHTBRACE, e.KEY_APOSTROPHE,
 }
+# The Ukrainian layout: an apostrophe in place of ё (no case to it), ґ on the backslash key
+UK_LETTER_KEYS = (RU_LETTER_KEYS - {e.KEY_GRAVE}) | {e.KEY_BACKSLASH}
+EXTRA_LETTER_KEYS = {"ru": RU_LETTER_KEYS, "uk": UK_LETTER_KEYS}
 LETTER_KEYS = {getattr(e, f"KEY_{c}") for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
 
 SHIFTS = {e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT}
@@ -43,5 +46,5 @@ def char_of(code: int, shift: bool, caps: bool, layout: str) -> str | None:
     pair = US_KEYS.get(code)
     if pair is None:
         return None
-    is_letter = code in LETTER_KEYS or (layout == "ru" and code in RU_LETTER_KEYS)
+    is_letter = code in LETTER_KEYS or code in EXTRA_LETTER_KEYS.get(layout, ())
     return pair[1] if shift != (caps and is_letter) else pair[0]

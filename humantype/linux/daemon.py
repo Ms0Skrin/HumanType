@@ -24,6 +24,7 @@ from gi.repository import Gio, GLib  # noqa: E402
 from .. import __version__  # noqa: E402
 from ..clipstore import ClipStore  # noqa: E402
 from ..detector import Detector  # noqa: E402
+from ..layout import LABELS, LANGS  # noqa: E402
 from ..stats import Stats  # noqa: E402
 from . import config  # noqa: E402
 from .devices import (Keyboard, can_read_any, is_keyboard, is_pointer, is_virtual, list_devices,  # noqa: E402
@@ -67,7 +68,7 @@ class Daemon:
         self._switching = False  # the engine is switching the layout for a fix: no indicator for that
         try:
             raw = json.loads(APP_LAYOUTS_FILE.read_text(encoding="utf-8"))
-            self.app_layouts = {str(k): v for k, v in raw.items() if v in ("ru", "en")}
+            self.app_layouts = {str(k): v for k, v in raw.items() if v in LANGS}
         except FileNotFoundError:
             pass
         except Exception:
@@ -351,13 +352,15 @@ class Daemon:
         self.engine.layout = lang
         if lang is None:
             return
+        if lang not in self.engine.detector.langs:
+            self._languages()  # a layout added since we last asked
         self._remember(lang)
         # A fix says what it did in its own note; the mark is for a layout changed by hand or
         # brought back for the program. Only GNOME can show it at the caret: elsewhere a note is
         # a desktop notification, too much for every switch.
         shell = getattr(self, "shell", None)  # a backend may tell its first layout while it is being made
         if shell is not None and not by_us and self.settings.layout_indicator and self.desktop == "gnome":
-            shell.note("layout", lang.upper())
+            shell.note("layout", LABELS.get(lang, lang.upper()))
 
     def _remember(self, lang: str) -> None:
         if self.settings.app_layouts and self.app and self.app_layouts.get(self.app) != lang:
@@ -375,6 +378,7 @@ class Daemon:
             state = self.shell.state()
             if state is None:
                 return GLib.SOURCE_REMOVE
+            self._languages()
             # Games and full-screen video are left alone.
             self.app = "" if state.fullscreen else (state.app or state.wm_class).lower()
             want = self.app_layouts.get(self.app)
@@ -386,7 +390,18 @@ class Daemon:
             log.exception("the layout of the program in front")
         return GLib.SOURCE_REMOVE
 
+    def _languages(self) -> None:
+        """Asks the desktop which layouts there are: Ukrainian is followed only when it is one of them."""
+        shell = getattr(self, "shell", None)  # a backend may tell its first layout while it is being made
+        if shell is None:
+            return
+        try:
+            self.engine.set_available(shell.languages())
+        except Exception:
+            log.exception("the layouts of the system")
+
     def _on_shell(self) -> None:
+        self._languages()
         self.engine.layout = self.shell.layout()
         self.engine.reset()
         self.scan()

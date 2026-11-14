@@ -7,6 +7,7 @@ import os
 from dataclasses import asdict, fields
 from pathlib import Path
 
+from ..layout import LANGS
 from .engine import TERMINALS, Settings
 
 log = logging.getLogger(__name__)
@@ -14,7 +15,7 @@ log = logging.getLogger(__name__)
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "humantype"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 EXCEPTIONS_FILE = CONFIG_DIR / "exceptions.txt"
-LEARNED_FILE = CONFIG_DIR / "learned.txt"  # words flipped by hand with Pause: "keys ru" or "keys en" a line
+LEARNED_FILE = CONFIG_DIR / "learned.txt"  # words flipped by hand with Pause: "keys ru", "keys en" or "keys uk" a line
 # The clipboard history (history.db and its pictures), the statistics, the layouts of the programs.
 DATA_DIR = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "humantype"
 
@@ -78,7 +79,7 @@ def load_learned() -> dict[str, str]:
     try:
         for line in LEARNED_FILE.read_text(encoding="utf-8").splitlines():
             parts = line.split()
-            if len(parts) == 2 and parts[1] in ("ru", "en"):
+            if len(parts) == 2 and parts[1] in LANGS:
                 learned[parts[0].lower()] = parts[1]
     except FileNotFoundError:
         pass

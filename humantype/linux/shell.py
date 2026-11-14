@@ -135,6 +135,18 @@ class ShellClient:
         state = self.state()
         return state.layout if state else None
 
+    def languages(self) -> set[str] | None:
+        """The languages there are layouts for. None from an extension older than this method
+        (it is replaced at the next login): Russian and English then, as before."""
+        if not self.present:
+            return None
+        try:
+            result = self.bus.call_sync(SHELL_NAME, SHELL_PATH, "org.humantype.Shell", "GetLayouts", None,
+                                        GLib.VariantType("(as)"), Gio.DBusCallFlags.NO_AUTO_START, CALL_TIMEOUT_MS, None)
+        except GLib.Error:
+            return None
+        return {lang for lang in result.unpack()[0] if lang} or None
+
     def set_layout(self, lang: str) -> bool:
         result = self._call("SetLayout", GLib.Variant("(s)", (lang,)), "(b)")
         return bool(result and result[0])

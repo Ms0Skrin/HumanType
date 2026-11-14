@@ -22,7 +22,6 @@ class Kde(Backend):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._langs: list[str | None] = []
         self.fields = atspi.make()
         self.bus.signal_subscribe(KB_NAME, KB_IFACE, None, KB_PATH, None, Gio.DBusSignalFlags.NONE, self._signal)
         Gio.bus_watch_name_on_connection(self.bus, KB_NAME, Gio.BusNameWatcherFlags.NONE,

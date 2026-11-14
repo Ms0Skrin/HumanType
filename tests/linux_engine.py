@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT))
 from evdev import ecodes as e  # noqa: E402
 
 from humantype.detector import Detector  # noqa: E402
-from humantype.layout import EN_TO_RU  # noqa: E402
+from humantype.layout import text_of  # noqa: E402
 from humantype.linux.engine import Engine, Settings, ShellState  # noqa: E402
 from humantype.linux.keymap import SHIFTS, US_KEYS, char_of  # noqa: E402
 
@@ -61,7 +61,7 @@ class Box:
             self.caps = not self.caps
         elif code in US_KEYS:
             c = char_of(code, bool(self.down & SHIFTS), self.caps, self.layout)
-            self.text.append(c.translate(EN_TO_RU) if self.layout == "ru" else c)
+            self.text.append(text_of(c, self.layout))
 
     # Output
     def press(self, code):
@@ -153,6 +153,7 @@ def reset(layout="en", **kw):
     detector.soft_exceptions = set()
     detector.learned = {}
     counts.clear()
+    engine.session.prefer = None
     engine.set_enabled(True)
 
 
@@ -298,6 +299,72 @@ reset(); type_("ghb"); box.text.append("X"); type_("dtn "); check("mid: text cha
 reset(); type_("ghbdtn"); event(e.KEY_PAUSE, 1); event(e.KEY_PAUSE, 0); check("mid: Pause flips the fixed word back", box.s(), "ghbdtn")
 engine.settings = Settings(excluded=("org.gnome.ptyxis", "jetbrains-*"), mid_word=False)
 reset(); type_("ghbdt"); check("mid: off in the settings", box.s(), "ghbdt")
+
+# --- Ukrainian: a third layout, followed only when the system has it ---
+pause = lambda: (event(e.KEY_PAUSE, 1), event(e.KEY_PAUSE, 0))  # noqa: E731
+check("uk: not in use until its layout is there", detector.langs, ("ru", "en"))
+reset("uk"); type_("hello "); check("uk: without it the Ukrainian layout is not followed", box.s(), "руддщ ")
+engine.set_available({"en", "ru"}); check("uk: no Ukrainian layout, two languages", detector.langs, ("ru", "en"))
+engine.set_available({"en", "ru", "uk"}); check("uk: its layout is there, three languages", detector.langs, ("ru", "en", "uk"))
+reset(); type_("ghbdsn zr cghfdb "); check("uk: en → uk", box.s(), "привіт як справи "); check("uk: en → uk layout", box.layout, "uk")
+reset(); type_("ghbdtn rfr ltkf "); check("uk: en → ru as before", box.s(), "привет как дела "); check("uk: en → ru layout", box.layout, "ru")
+reset(); type_("z nt,z k.,k. "); check("uk: Russian short words as before", box.s(), "я тебя люблю "); check("uk: ... layout", box.layout, "ru")
+reset(); type_("z nt,t le;t k.,k. "); check("uk: Ukrainian short words", box.s(), "я тебе дуже люблю "); check("uk: ... layout", box.layout, "uk")
+reset(); type_("hello world, this is fine "); check("uk: english untouched", box.s(), "hello world, this is fine ")
+reset("ru"); type_("ghbdsn "); check("uk: ru → uk", box.s(), "привіт "); check("uk: ru → uk layout", box.layout, "uk")
+reset("uk"); type_("vsckb "); check("uk: uk → ru", box.s(), "мысли "); check("uk: uk → ru layout", box.layout, "ru")
+reset("uk"); type_("hello world "); check("uk: uk → en", box.s(), "hello world "); check("uk: uk → en layout", box.layout, "en")
+reset("ru"); type_("hello world "); check("uk: ru → en as before", box.s(), "hello world ")
+reset("uk"); type_("ghbdsn zr cghfdb "); check("uk: Ukrainian untouched", box.s(), "привіт як справи "); check("uk: ... layout", box.layout, "uk")
+reset("ru"); type_("ghbdtn rfr ltkf "); check("uk: Russian untouched", box.s(), "привет как дела "); check("uk: ... layout", box.layout, "ru")
+# words Russian and Ukrainian spell alike move nothing, whichever of the two layouts is on
+reset("uk"); type_("vfvf nfr yf "); check("uk: shared words in the Ukrainian layout", (box.s(), box.layout), ("мама так на ", "uk"))
+reset("ru"); type_("vfvf nfr yf "); check("uk: shared words in the Russian layout", (box.s(), box.layout), ("мама так на ", "ru"))
+check("uk: shared words, nothing counted", counts, [])
+# a word only the other Cyrillic language has, typed alike in both: the text stays, the layout follows
+reset("uk"); type_("ghbdtn "); check("uk: a Russian word in the Ukrainian layout", (box.s(), box.layout), ("привет ", "ru"))
+type_("vs "); check("uk: ... and the next word comes out right", box.s(), "привет мы ")
+reset("uk"); type_("ghbdtn "); type_("\b"); check("uk: ... Backspace takes the layout back", (box.s(), box.layout), ("привет", "uk"))
+reset("ru"); type_("lzre. "); check("uk: a Ukrainian word in the Russian layout", (box.s(), box.layout), ("дякую ", "uk"))
+# the keys that differ
+reset(); type_("g`znm [dbkby "); check("uk: the apostrophe", box.s(), "п'ять хвилин ")
+reset(); type_("]]? \\fyjr "); check("uk: ї and ґ", box.s(), "її, ґанок ")
+reset("uk"); combo(e.KEY_CAPSLOCK); engine.caps = True; type_("]s'\\`"); check("uk: Caps Lock on its letters", box.s(), "ЇІЄҐ'")
+combo(e.KEY_CAPSLOCK); engine.caps = False
+reset(); type_("' gbnfyyz "); check("uk: «є» is fixed with its neighbour", box.s(), "є питання ")
+reset(); type_("it's "); check("uk: an apostrophe in English stays", box.s(), "it's ")
+# by hand
+reset(); engine.set_enabled(False); type_("ghbdsn"); pause(); check("uk: Pause, a Ukrainian word", (box.s(), box.layout), ("привіт", "uk"))
+pause(); check("uk: Pause again, back to Latin", (box.s(), box.layout), ("ghbdsn", "en"))
+reset(); engine.set_enabled(False); type_("ghbdtn"); pause(); check("uk: Pause, a Russian word", (box.s(), box.layout), ("привет", "ru"))
+reset("ru"); engine.set_enabled(False); type_("ghbdsn"); pause(); check("uk: Pause, Russian layout → Ukrainian", (box.s(), box.layout), ("привіт", "uk"))
+reset(); type_("qwzx"); pause(); check("uk: Pause, no word anywhere: Russian first", (box.s(), detector.learned.get("qwzx")), ("йцяч", "ru"))
+reset(); engine.session.prefer = "uk"; type_("qwzx"); pause()
+check("uk: Pause, no word anywhere: the Cyrillic layout last typed in", (box.layout, detector.learned.get("qwzx")), ("uk", "uk"))
+learned = dict(detector.learned)
+reset(); detector.learned = learned; type_("qwzx "); check("uk: a learned word goes where it was sent", (box.s(), box.layout), ("йцяч ", "uk"))
+# the layout last typed in decides for words spelled alike
+reset(); type_("vfvf "); check("uk: a shared word from Latin: Russian first", (box.s(), box.layout), ("мама ", "ru"))
+reset(); engine.session.prefer = "uk"; type_("vfvf "); check("uk: ... Ukrainian when it was typed in last", (box.s(), box.layout), ("мама ", "uk"))
+# terminal answers from the Ukrainian layout
+reset("uk", purpose="terminal"); type_("yes\n"); check("uk: terminal: нуі -> yes", (box.s(), box.layout), ("yes\n", "en"))
+# at the fifth letter
+engine.configure(Settings(excluded=("org.gnome.ptyxis", "jetbrains-*")))
+reset(); type_("ghbds"); check("uk: mid: fixed at the fifth letter", (box.s(), box.layout), ("приві", "uk"))
+type_("n zr "); check("uk: mid: the rest goes on", box.s(), "привіт як ")
+reset(); type_("ghbdt"); check("uk: mid: Russian as before", (box.s(), box.layout), ("приве", "ru"))
+reset("uk"); type_("hello"); check("uk: mid: uk → en", (box.s(), box.layout), ("hello", "en"))
+reset("uk"); type_("ghbdsn "); check("uk: mid: the right layout is untouched", box.s(), "привіт ")
+# switched off in the settings: the Ukrainian layout is any other layout again
+engine.configure(Settings(excluded=("org.gnome.ptyxis", "jetbrains-*"), mid_word=False, ukrainian=False))
+check("uk: off in the settings", detector.langs, ("ru", "en"))
+reset("uk"); type_("hello "); check("uk: off: its layout is not followed", box.s(), "руддщ ")
+reset(); type_("ghbdtn "); check("uk: off: Russian as ever", (box.s(), box.layout), ("привет ", "ru"))
+# a Ukrainian layout and no Russian one: words spelled alike go to the Ukrainian
+engine.configure(Settings(excluded=("org.gnome.ptyxis", "jetbrains-*"), mid_word=False))
+engine.set_available({"en", "uk"}); check("uk: no Russian layout", detector.langs, ("uk", "en", "ru"))
+reset(); type_("vfvf "); check("uk: no Russian layout: a shared word", (box.s(), box.layout), ("мама ", "uk"))
+engine.set_available(None); check("uk: the desktop does not tell its layouts", detector.langs, ("ru", "en"))
 
 print("FAILS:", fails)
 sys.exit(1 if fails else 0)

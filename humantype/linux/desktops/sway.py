@@ -60,7 +60,6 @@ class Sway(Backend):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.path = os.environ.get("SWAYSOCK") or _find_socket()
-        self._langs: list[str | None] = []
         self.fields = atspi.make()
         self._events: socket.socket | None = None
         GLib.idle_add(self._connect)

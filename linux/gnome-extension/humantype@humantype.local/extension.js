@@ -32,6 +32,9 @@ const SHELL_IFACE = `
       <arg type="s" direction="in" name="lang"/>
       <arg type="b" direction="out" name="ok"/>
     </method>
+    <method name="GetLayouts">
+      <arg type="as" direction="out" name="langs"/>
+    </method>
     <method name="ShowNote">
       <arg type="s" direction="in" name="kind"/>
       <arg type="s" direction="in" name="text"/>
@@ -81,8 +84,8 @@ const DAEMON_IFACE = `
 const DaemonProxy = Gio.DBusProxy.makeProxyWrapper(DAEMON_IFACE);
 
 const WORD_EDGE = ' \t\n([{«"\'—–-/';
-const XKB_TO_LANG = {us: 'en', ru: 'ru'};
-const LANG_TO_XKB = {en: 'us', ru: 'ru'};
+const XKB_TO_LANG = {us: 'en', ru: 'ru', ua: 'uk'};
+const LANG_TO_XKB = {en: 'us', ru: 'ru', uk: 'ua'};
 
 function purposeName(value) {
     for (const [name, v] of Object.entries(IBus.InputPurpose)) {
@@ -415,6 +418,15 @@ export default class HumanTypeExtension extends Extension {
             state.common_edge = new GLib.Variant('b', prevCommon === '' || WORD_EDGE.includes(prevCommon));
         }
         return state;
+    }
+
+    // The languages there are layouts for: Ukrainian is followed only when it is one of them.
+    GetLayouts() {
+        const langs = Object.values(this._sources.inputSources)
+            .filter(s => s.type === 'xkb')
+            .map(s => XKB_TO_LANG[s.xkbId.split('+')[0]])
+            .filter(Boolean);
+        return [...new Set(langs)];
     }
 
     async SetLayoutAsync([lang], invocation) {

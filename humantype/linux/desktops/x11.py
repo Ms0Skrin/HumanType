@@ -64,7 +64,6 @@ class X11(Backend):
             raise OSError("cannot open the X display")
         self.root = self.x.XDefaultRootWindow(self.dpy)
         self._atoms: dict[str, int] = {}
-        self._langs: list[str | None] = []
         self._rules = b""
         self._window = 0
         self.fields = atspi.make()

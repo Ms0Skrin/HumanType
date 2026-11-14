@@ -22,7 +22,7 @@ from evdev import ecodes as e
 
 from .. import textops
 from ..detector import MID_LEN, SENSITIVITY, Detector, Session
-from ..layout import EN_TO_RU, LANG_RU, RU_TO_EN
+from ..layout import ID_LANGS, NOTE_LABELS, keys_of, text_of
 from .keymap import ALTS, CTRLS, DELIMITERS, METAS, MODIFIERS, SHIFTS, US_KEYS, char_of
 
 log = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ class Press:
     code: int
     shift: bool
     caps: bool
-    layout: str  # "en" | "ru": the layout the key was pressed in
+    layout: str  # "en" | "ru" | "uk": the layout the key was pressed in
 
 
 SPACE = e.KEY_SPACE
@@ -54,7 +54,7 @@ SPACE = e.KEY_SPACE
 class ShellState:
     """What the GNOME Shell extension knows about the focus."""
 
-    layout: str | None  # "en" | "ru" | None for any other layout
+    layout: str | None  # "en" | "ru" | "uk" | None for any other layout
     app: str  # app id without .desktop, or ""
     wm_class: str
     purpose: str  # "normal", "password", "pin", "terminal", "url", ...
@@ -101,6 +101,7 @@ class Settings:
     notify: bool = True
     excluded: tuple[str, ...] = ()
     terminal_answers: bool = True  # y/yes/n/no typed in Russian in a terminal
+    ukrainian: bool = True  # Ukrainian too, when its layout is among the system's
     history: bool = True  # clipboard history (GNOME)
     history_hotkey: str = "ctrl+shift+v"  # left alone in terminals, where it pastes
     history_limit: int = 100
@@ -119,10 +120,6 @@ def parse_hotkey(text: str) -> tuple[frozenset[str], int] | None:
     return (frozenset(parts[:-1]), code) if isinstance(code, int) else None
 
 
-def other(lang: str) -> str:
-    return "ru" if lang == "en" else "en"
-
-
 def is_terminal(state: ShellState) -> bool:
     names = {n.lower() for n in (state.app, state.wm_class) if n}
     return state.purpose == "terminal" or any(fnmatch.fnmatchcase(n, t) for n in names for t in TERMINALS)
@@ -135,8 +132,7 @@ def render(presses: list[Press], layout: str) -> str:
         if p.code == SPACE:
             out.append(" ")
             continue
-        c = char_of(p.code, p.shift, p.caps, layout) or ""
-        out.append(c.translate(EN_TO_RU) if layout == "ru" else c)
+        out.append(text_of(char_of(p.code, p.shift, p.caps, layout) or "", layout))
     return "".join(out)
 
 
@@ -159,6 +155,7 @@ class Engine:
         self._mid_old: str | None = None  # the word being typed was fixed in its middle: the layout it began in
         self._keep = False  # ... and that fix was undone: leave the word alone when it ends
         self.layout: str | None = None  # kept up to date by the shell's signals
+        self.available: set[str] | None = None  # the languages the system has layouts for; None: not told
         self.caps = False
         self.down: set[int] = set()  # keys held, as the system sees them
         self.line: list[Press] = []  # what was typed since the caret last jumped, spaces included
@@ -177,8 +174,28 @@ class Engine:
         self.detector.sensitivity = SENSITIVITY.get(settings.sensitivity, SENSITIVITY["normal"])
         self.detector.short_words = settings.short_words
         self._history_key = parse_hotkey(settings.history_hotkey) if settings.history else None
+        self._set_langs()
         self.session.reset()
         self._undo = None
+
+    def set_available(self, langs: set[str] | None) -> None:
+        """The languages the system has layouts for, as the desktop tells them."""
+        if langs != self.available:
+            self.available = langs
+            self._set_langs()
+
+    def _set_langs(self) -> None:
+        """Russian and English always, as ever; Ukrainian when its layout is there and the setting
+        is on. Where there is a Ukrainian layout and no Russian one, a word that reads the same in
+        both goes to the Ukrainian."""
+        have = self.available or set()
+        langs = ["ru", "en"]
+        if self.settings.ukrainian and "uk" in have and self.detector.available("uk"):
+            langs = ["ru", "en", "uk"] if "ru" in have else ["uk", "en", "ru"]
+        if tuple(langs) != self.detector.langs:
+            self.detector.set_langs(langs)
+            log.info("languages: %s", ", ".join(self.detector.langs))
+            self.reset()
 
     def set_enabled(self, on: bool) -> None:
         self.settings = replace(self.settings, autoswitch=on)
@@ -250,7 +267,7 @@ class Engine:
             return self._backspace()
         if code in DELIMITERS:
             return self._delimiter(code)
-        if code not in US_KEYS or self.layout is None:
+        if code not in US_KEYS or self.layout not in self.detector.langs:
             self.reset()  # arrows, Home, Delete, F-keys, numpad...: the caret or the text moved on
             return False
         self._undo = None
@@ -349,11 +366,12 @@ class Engine:
         run = self.line
         if (code == SPACE or not self.settings.autoswitch or not self.settings.terminal_answers
                 or self._origin != "edge" or not run or len(run) > 3
-                or any(p.layout != "ru" or p.code == SPACE for p in run)
+                or any(p.layout != run[0].layout or p.layout == "en" or p.code == SPACE for p in run)
                 or render(run, "en").lower() not in ANSWERS):
             return False
+        typed_in = run[0].layout
         state = self.out.shell_state()
-        if state is None or state.layout != "ru" or not is_terminal(state):
+        if state is None or state.layout != typed_in or not is_terminal(state):
             return False
         if not self.out.set_layout("en"):
             return False
@@ -362,7 +380,7 @@ class Engine:
         self.out.press(code)  # Enter goes on; its release follows from the keyboard
         log.info("terminal answer %r", render(run, "en"))
         if self.settings.notify:
-            self.out.note("fix", f"{render(run, 'ru')}  →  {render(run, 'en')}")
+            self.out.note("fix", f"{render(run, typed_in)}  →  {render(run, 'en')}")
         self._finish(code)
         return True
 
@@ -429,7 +447,9 @@ class Engine:
             self._finish(code)
             return False
         self.layout = fix.layout
-        self._retype(len(run), run)
+        moved = fix.text == fix.original  # Russian and Ukrainian type it alike: only the layout moves
+        if not moved:
+            self._retype(len(run), run)
         self.out.press(code)  # the delimiter goes on; its release follows from the keyboard
         new_run = [replace(p, layout=fix.layout) for p in run]
         self.line[start:] = new_run
@@ -437,7 +457,7 @@ class Engine:
         self._undo = _Undo(run, layout, fix.original, fix.text, fix.keys) if code == SPACE else None
         self.count("fixed")
         if self.settings.notify:
-            self.out.note("fix", f"{fix.original}  →  {fix.text}")
+            self.out.note("fix", f"{NOTE_LABELS[fix.layout]}: {fix.text}" if moved else f"{fix.original}  →  {fix.text}")
         return True
 
     def _finish(self, code: int) -> None:
@@ -577,10 +597,14 @@ class Engine:
         if not letters:
             return
         source = letters[-1].layout
-        target = other(source)
         if any(p.layout != source for p in letters):
             log.info("flip skipped: the text mixes layouts")
             return
+        # The last word says where to: with three layouts, the one it reads as a word in.
+        word = self.line[self._run_start(1):]
+        target = self.detector.flip_target(
+            "".join(char_of(p.code, p.shift, p.caps, source) or "" for p in word if p.code != SPACE), source,
+            self.session.prefer)
         if not self.out.set_layout(target):
             return
         self.layout = target
@@ -593,7 +617,7 @@ class Engine:
         if not whole_line and len(letters) == len(run):
             self._learn("".join(char_of(p.code, p.shift, p.caps, source) or "" for p in run).lower(), target)
         text = render(run, target).strip()
-        self.out.note("flip", f"{'РУ' if target == 'ru' else 'EN'}: {text[:40]}")
+        self.out.note("flip", f"{NOTE_LABELS[target]}: {text[:40]}")
 
     def _learn(self, keys: str, lang: str) -> None:
         """The person flipped this word by hand: from now on it is switched by itself."""
@@ -625,7 +649,7 @@ class Engine:
             if c == " ":
                 presses.append(Press(SPACE, False, self.caps, layout))
                 continue
-            key = c if layout == "en" else c.translate(RU_TO_EN)
+            key = keys_of(c, layout)
             found = next((Press(code, shift, self.caps, layout) for code in US_KEYS for shift in (False, True)
                           if char_of(code, shift, self.caps, layout) == key), None)
             if found is None or render([found], layout) != c:
@@ -645,7 +669,7 @@ class Engine:
         source = letters[-1].layout
         text = render(run, source)
         new, lang = transform(text)
-        target = source if lang is None else ("ru" if lang == LANG_RU else "en")
+        target = source if lang is None else ID_LANGS.get(lang, "en")
         presses = self._presses(new, target) if new != text else None
         if presses is None:
             self.out.note("flip", "Нечего менять")
@@ -658,4 +682,4 @@ class Engine:
         self.session.reset()
         self._undo = None
         self._mid_old = None
-        self.out.note("flip", f"{mark or ('РУ' if target == 'ru' else 'EN')}: {new.strip()[:40]}")
+        self.out.note("flip", f"{mark or NOTE_LABELS[target]}: {new.strip()[:40]}")

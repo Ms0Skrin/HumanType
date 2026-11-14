@@ -19,12 +19,12 @@ log = logging.getLogger(__name__)
 
 WORD_EDGE = " \t\n([{«\"'—–-/"
 # xkb layout codes and the human names some desktops give instead.
-XKB_LANG = {"us": "en", "gb": "en", "ru": "ru"}
-NAME_LANG = (("russian", "ru"), ("рус", "ru"), ("english", "en"), ("англ", "en"))
+XKB_LANG = {"us": "en", "gb": "en", "ru": "ru", "ua": "uk"}
+NAME_LANG = (("ukrainian", "uk"), ("укр", "uk"), ("russian", "ru"), ("рус", "ru"), ("english", "en"), ("англ", "en"))
 
 
 def lang_of(layout: str) -> str | None:
-    """'us', 'us(intl)', 'ru', 'Russian', 'English (US)' → 'en' / 'ru' / None."""
+    """'us', 'us(intl)', 'ru', 'ua', 'Russian', 'English (US)', 'Ukrainian' → 'en' / 'ru' / 'uk' / None."""
     code = layout.strip().split("(")[0].split("+")[0].strip().lower()
     if code in XKB_LANG:
         return XKB_LANG[code]
@@ -64,6 +64,7 @@ class Backend:
         self._on_appeared = on_appeared
         self._on_vanished = on_vanished
         self._lang: str | None = None
+        self._langs: list[str | None] = []  # the system's layouts in their order, None for one we do not know
         self._note_id = 0
         # What the window manager says of the focused window; the field comes from AT-SPI.
         self.app = ""
@@ -109,6 +110,10 @@ class Backend:
 
     def layout(self) -> str | None:
         return self._current()
+
+    def languages(self) -> set[str] | None:
+        """The languages there are layouts for; None when the desktop has not told yet."""
+        return {lang for lang in self._langs if lang} or None
 
     def set_layout(self, lang: str) -> bool:
         if not self.present:

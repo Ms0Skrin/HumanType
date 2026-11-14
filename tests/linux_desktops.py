@@ -45,7 +45,7 @@ def fake_kde(index_file: str) -> None:
         if name == "getLayout":
             inv.return_value(GLib.Variant("(u)", (state["index"],)))
         elif name == "getLayoutsList":
-            inv.return_value(GLib.Variant("(a(sss))", ([("us", "", "English (US)"), ("ru", "", "Russian")],)))
+            inv.return_value(GLib.Variant("(a(sss))", ([("us", "", "English (US)"), ("ru", "", "Russian"), ("ua", "", "Ukrainian")],)))
         elif name == "setLayout":
             state["index"] = params.unpack()[0]
             Path(index_file).write_text(str(state["index"]))
@@ -108,6 +108,10 @@ check("lang us(intl)", lang_of("us(intl)"), "en")
 check("lang name", lang_of("Russian"), "ru")
 check("lang long name", lang_of("English (US)"), "en")
 check("lang other", lang_of("de"), None)
+check("lang ua", lang_of("ua"), "uk")
+check("lang ua(winkeys)", lang_of("ua(winkeys)"), "uk")
+check("lang Ukrainian", lang_of("Ukrainian"), "uk")
+check("lang Ukrainian (legacy)", lang_of("Ukrainian (legacy)"), "uk")
 t = text_check("мама ghbdtn", "ghbdtn", False)
 check("text: matches at edge", (t["matches"], t["at_edge"], t["common"]), (True, True, 6))
 t = text_check("xghbdtn", "helloghbdtn", False)
@@ -408,6 +412,12 @@ check("kde: layout", kde.layout(), "ru")
 check("kde: switch to en", kde.set_layout("en"), True)
 pump(0.2)
 check("kde: keyboard daemon index", kde_index(), 0)
+check("kde: the languages there are layouts for", kde.languages(), {"en", "ru", "uk"})
+check("kde: switch to uk", kde.set_layout("uk"), True)
+pump(0.3, until=lambda: kde_index() == 2)
+check("kde: keyboard daemon index of ua", (kde_index(), kde.layout()), (2, "uk"))
+check("kde: and back to en", (kde.set_layout("en"), kde.layout()), (True, "en"))
+pump(0.3, until=lambda: kde_index() == 0)
 # What the KWin script does when a window gets the focus:
 proc = Gio.DBusConnection.new_for_address_sync(Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None),
                                                Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT

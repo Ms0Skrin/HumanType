@@ -34,7 +34,6 @@ class Hyprland(Backend):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.dir = socket_dir()
-        self._langs: list[str | None] = []
         self.fields = atspi.make()
         self._events: socket.socket | None = None
         self._buffer = b""

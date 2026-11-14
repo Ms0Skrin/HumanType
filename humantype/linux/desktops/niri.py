@@ -41,7 +41,6 @@ class Niri(Backend):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.path = find_socket()
-        self._langs: list[str | None] = []
         self._index = 0
         self.fields = atspi.make()
         self._events: socket.socket | None = None
