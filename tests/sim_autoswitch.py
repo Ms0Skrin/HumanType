@@ -28,9 +28,9 @@ for name in ("win32api", "win32con", "win32gui", "win32process", "pythoncom", "w
 
 from humantype import autoswitch as A  # noqa: E402
 from humantype.detector import Detector  # noqa: E402
-from humantype.layout import EN_TO_RU  # noqa: E402
+from humantype.layout import text_of  # noqa: E402
 
-HKL = {"en": 0x0409, "ru": 0x0419}
+HKL = {"en": 0x0409, "ru": 0x0419}  # the layouts installed; the Ukrainian checks add theirs
 
 
 class Box:
@@ -53,7 +53,7 @@ class Box:
             self.text.append("\t")
         else:
             c = A.US_KEYS[vk][1 if shift else 0]
-            self.text.append(c.translate(EN_TO_RU) if self.layout == "ru" else c)
+            self.text.append(text_of(c, self.layout))
 
     def s(self):
         return "".join(self.text)
@@ -113,7 +113,7 @@ A.is_fullscreen = lambda h: False
 A.win32api.PostMessage = post_message
 A.AutoSwitcher._layout = staticmethod(lambda hwnd: box.layout)
 A.AutoSwitcher._fast_layout = lambda self, hwnd: box.layout
-A.AutoSwitcher._hkl = staticmethod(lambda lang: HKL[lang])
+A.AutoSwitcher._hkl = staticmethod(lambda lang: HKL.get(lang, 0))
 A.win32process.GetWindowThreadProcessId.return_value = (1, 2)
 A.user32.GetForegroundWindow.return_value = 1
 A.user32.GetKeyState.return_value = 0
@@ -171,6 +171,7 @@ def reset(layout="en", slow=0.0, switch_delay=0.0, app="notepad.exe"):
     sw._hwnd = 0  # the next key comes to a new window: a word starts there
     sw.detector.exceptions = set()
     sw.detector.soft_exceptions = set()
+    sw.session.prefer = None
 
 
 fails = 0
@@ -357,6 +358,49 @@ reset(); type_("ghbdtn "); check("mid: the field holds other text, no fix", box.
 field["says"] = None
 sw.mid_word = False
 reset(); type_("ghbdt"); check("mid: off in the settings", box.s(), "ghbdt")
+
+# --- Ukrainian: a third layout, followed only when it is installed ---
+check("uk: not in use while its layout is not installed", detector.langs, ("ru", "en"))
+reset("uk"); type_("hello "); check("uk: without it the Ukrainian layout is not followed", box.s(), "руддщ ")
+HKL["uk"] = 0x0422
+reset(); type_("x")  # seen at the next window: the word list is read on a thread of its own
+for _ in range(400):
+    if "uk" in detector.langs:
+        break
+    time.sleep(0.01)
+check("uk: its layout is installed, three languages", detector.langs, ("ru", "en", "uk"))
+reset(); type_("ghbdsn zr cghfdb "); check("uk: en → uk", (box.s(), box.layout), ("привіт як справи ", "uk"))
+reset(); type_("ghbdtn rfr ltkf "); check("uk: en → ru as before", (box.s(), box.layout), ("привет как дела ", "ru"))
+reset(); type_("hello world "); check("uk: english untouched", box.s(), "hello world ")
+reset("ru"); type_("ghbdsn "); check("uk: ru → uk", (box.s(), box.layout), ("привіт ", "uk"))
+reset("uk"); type_("vsckb "); check("uk: uk → ru", (box.s(), box.layout), ("мысли ", "ru"))
+reset("uk"); type_("hello world "); check("uk: uk → en", (box.s(), box.layout), ("hello world ", "en"))
+reset("uk"); type_("vfvf nfr yf "); check("uk: shared words in the Ukrainian layout", (box.s(), box.layout), ("мама так на ", "uk"))
+reset("ru"); type_("vfvf nfr yf "); check("uk: shared words in the Russian layout", (box.s(), box.layout), ("мама так на ", "ru"))
+reset("uk"); type_("ghbdtn "); check("uk: a Russian word in the Ukrainian layout: the layout follows", (box.s(), box.layout), ("привет ", "ru"))
+type_("\b"); check("uk: ... Backspace takes the layout back", (box.s(), box.layout), ("привет", "uk"))
+reset(); type_("g`znm [dbkby "); check("uk: the apostrophe", box.s(), "п'ять хвилин ")
+reset("uk"); type_("ghbdsn \b"); check("uk: Backspace in the right layout is a Backspace", box.s(), "привіт")
+reset("uk", app="WindowsTerminal.exe"); type_("yes\n"); check("uk: terminal: нуі → yes", (box.s(), box.layout), ("yes\n", "en"))
+reset("uk", app="WindowsTerminal.exe"); type_("git status\n"); check("uk: command: пше іефегі → git status", box.s(), "git status\n")
+reset(); sw.enabled = False; type_("ghbdsn"); sw.flip(False); idle(); check("uk: flip, a Ukrainian word", (box.s(), box.layout), ("привіт", "uk"))
+sw.flip(False); idle(); check("uk: flip again, back to Latin", (box.s(), box.layout), ("ghbdsn", "en"))
+reset("ru"); type_("ghbdsn"); sw.flip(False); idle(); check("uk: flip, Russian layout → Ukrainian", (box.s(), box.layout), ("привіт", "uk"))
+sw.enabled = True
+sw.detector.learned = {}
+sw.mid_word = True
+reset(); type_("ghbds"); check("uk: mid: fixed at the fifth letter", (box.s(), box.layout), ("приві", "uk"))
+type_("n zr "); check("uk: mid: the rest goes on", box.s(), "привіт як ")
+sw.mid_word = False
+sw.configure(True, "normal", True, True, [], True, False, ukrainian=False)
+check("uk: off in the settings", detector.langs, ("ru", "en"))
+reset("uk"); type_("hello "); check("uk: off: its layout is not followed", box.s(), "руддщ ")
+reset(); type_("ghbdtn "); check("uk: off: Russian as ever", (box.s(), box.layout), ("привет ", "ru"))
+sw.configure(True, "normal", True, True, [], True, False, ukrainian=True)
+del HKL["ru"]
+reset(); type_("x"); check("uk: no Russian layout: Ukrainian first", detector.langs, ("uk", "en", "ru"))
+reset(); type_("vfvf "); check("uk: no Russian layout: a shared word", (box.s(), box.layout), ("мама ", "uk"))
+HKL["ru"] = 0x0419
 
 print("FAILS:", fails)
 sys.exit(1 if fails else 0)

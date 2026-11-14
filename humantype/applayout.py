@@ -35,13 +35,13 @@ GIVE_UP = 6  # looks after which a window that does not take the layout is left 
 
 
 class AppLayouts(QObject):
-    changed = Signal(str, int)  # the layout the window in front has now ("ru" | "en"), the window
+    changed = Signal(str, int)  # the layout the window in front has now ("ru" | "en" | "uk"), the window
 
     def __init__(self, path: Path) -> None:
         super().__init__()
         self.path = path
         self.remember = True
-        self.layouts: dict[str, str] = {}  # process name, lowercase -> "ru" | "en"
+        self.layouts: dict[str, str] = {}  # process name, lowercase -> "ru" | "en" | "uk"
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             self.layouts = {str(name).lower(): lang for name, lang in raw.items() if lang in LANG_IDS}

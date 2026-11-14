@@ -49,6 +49,7 @@ QLabel {{
 LOOK = {
     "ru": ("RU", theme.ACCENT, "rgba(56, 189, 248, 0.6)"),
     "en": ("EN", theme.TEXT, "rgba(139, 149, 181, 0.6)"),
+    "uk": ("UA", "#FACC15", "rgba(250, 204, 21, 0.6)"),
 }
 
 

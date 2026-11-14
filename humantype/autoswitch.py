@@ -33,7 +33,8 @@ from PySide6.QtCore import QObject, Signal
 from . import elevation, uia
 from .config import DEFAULT_EXCLUDED, TERMINAL_COMMANDS, TERMINALS
 from .detector import MID_LEN, SENSITIVITY, Detector, Fix, Session
-from .layout import EN_TO_RU, LANG_EN, LANG_RU
+from . import layout as layouts
+from .layout import ID_LANGS, LANG_IDS, text_of
 
 log = logging.getLogger(__name__)
 
@@ -155,11 +156,12 @@ US_KEYS.update(
     }
 )
 RU_LETTER_KEYS = {0xBA, 0xBC, 0xBE, 0xC0, 0xDB, 0xDD, 0xDE}  # ж б ю ё х ъ э: Caps Lock applies to them in ЙЦУКЕН
+# The Ukrainian layout: ж б ю х ї є; the key of ё gives an apostrophe there, which has no case.
+EXTRA_LETTER_KEYS = {"ru": RU_LETTER_KEYS, "uk": RU_LETTER_KEYS - {0xC0}}
 MODIFIERS = {0x10, 0x11, 0x12, 0x14, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}
 VK_BACK, VK_TAB, VK_RETURN, VK_SPACE = 0x08, 0x09, 0x0D, 0x20
 DELIMITERS = {VK_SPACE, VK_RETURN, VK_TAB}  # keys that end a word and get it judged
-LANGS = {LANG_EN: "en", LANG_RU: "ru"}
-LANG_IDS = {"en": LANG_EN, "ru": LANG_RU}
+LANGS = ID_LANGS  # Windows language identifier -> "en" | "ru" | "uk"
 MOD_KEYS = ((0x12, 0x0001), (0x11, 0x0002), (0x10, 0x0004), (0x5B, 0x0008), (0x5C, 0x0008))  # vk, MOD_* of RegisterHotKey
 HELD_MODS = (0x11, 0x12, 0x5B, 0x5C)  # Ctrl, Alt, Win: a key held with them is a shortcut, not text
 MAX_LINE = 300
@@ -181,6 +183,7 @@ REASONS = {
     "short word, waiting for context": "короткое слово: решится по следующему",
     "neither reading is a word": "ни в одной раскладке не слово",
     "both are words": "слово есть в обеих раскладках",
+    "same text in both layouts": "в русской и украинской раскладке это одно и то же",
     "other reading is a rare word": "в другой раскладке слишком редкое слово",
     "current reading is a known word": "в этой раскладке это настоящее слово",
     "unsure": "не уверен: буквы похожи на оба языка",
@@ -192,11 +195,7 @@ class Press:
     vk: int
     shift: bool
     caps: bool
-    layout: str  # "en" | "ru": the layout the key was pressed in
-
-
-def other(lang: str) -> str:
-    return "ru" if lang == "en" else "en"
+    layout: str  # "en" | "ru" | "uk": the layout the key was pressed in
 
 
 def char_of(p: Press, layout: str) -> str:
@@ -204,14 +203,13 @@ def char_of(p: Press, layout: str) -> str:
     if p.vk == VK_SPACE:
         return " "
     pair = US_KEYS[p.vk]
-    is_letter = 0x41 <= p.vk <= 0x5A or (layout == "ru" and p.vk in RU_LETTER_KEYS)
+    is_letter = 0x41 <= p.vk <= 0x5A or p.vk in EXTRA_LETTER_KEYS.get(layout, ())
     return pair[1] if p.shift != (p.caps and is_letter) else pair[0]
 
 
 def render(presses: list[Press], layout: str) -> str:
     """The text these keys give in `layout`."""
-    text = "".join(char_of(p, layout) for p in presses)
-    return text.translate(EN_TO_RU) if layout == "ru" else text
+    return text_of("".join(char_of(p, layout) for p in presses), layout)
 
 
 
@@ -428,6 +426,7 @@ class AutoSwitcher(QObject):
         self.skip_fullscreen = True
         self.terminal_answers = True  # y/yes/n/no typed in Russian in a terminal
         self.mid_word = True  # fix a word at its fifth letter, without waiting for the space
+        self.ukrainian = True  # Ukrainian too, when its layout is installed
         self.excluded: set[str] = {name.lower() for name in DEFAULT_EXCLUDED}
         self.flip_hotkeys: set[tuple[int, int]] = set()  # (MOD_*, vk) of the hotkeys that flip the line
         self._own_pid = win32api.GetCurrentProcessId()
@@ -456,6 +455,7 @@ class AutoSwitcher(QObject):
         self._stopped = threading.Event()
         self._file_lock = threading.Lock()
         self._window_why = ""  # why the focused window is not followed
+        self._loading = False  # a word list is being read (see _set_langs)
         self.load_exceptions()
         self.load_learned()
         try:
@@ -466,9 +466,10 @@ class AutoSwitcher(QObject):
     # --- settings ---
 
     def configure(self, enabled: bool, sensitivity: str, short_words: bool, skip_fullscreen: bool, excluded: list[str],
-                  terminal_answers: bool = True, mid_word: bool = True) -> None:
+                  terminal_answers: bool = True, mid_word: bool = True, ukrainian: bool = True) -> None:
         with self._lock:
             self.mid_word = mid_word
+            self.ukrainian = ukrainian
             self.enabled = enabled
             self.detector.sensitivity = SENSITIVITY.get(sensitivity, SENSITIVITY["normal"])
             self.detector.short_words = short_words
@@ -477,6 +478,38 @@ class AutoSwitcher(QObject):
             self.terminal_answers = terminal_answers
             self._hwnd = 0  # judge the window again by the new settings
             self._reset()
+            self._set_langs()
+
+    def _set_langs(self, wait: bool = True) -> None:
+        """Russian and English always, as ever; Ukrainian when its layout is installed and the
+        setting is on. With a Ukrainian layout and no Russian one, a word that reads the same in
+        both goes to the Ukrainian. wait=False (from the hook, which must answer at once): a word
+        list not yet read is read on a thread of its own and comes into use when it is there."""
+        langs = ["ru", "en"]
+        if self.ukrainian and self.detector.available("uk") and self._hkl("uk"):
+            langs = ["ru", "en", "uk"] if self._hkl("ru") else ["uk", "en", "ru"]
+        if tuple(langs) == self.detector.langs:
+            return
+        if not wait and any(lang not in self.detector.freq for lang in langs):
+            if not self._loading:
+                self._loading = True
+                threading.Thread(target=self._load_langs, args=(langs,), name="humantype-words", daemon=True).start()
+            return
+        self.detector.set_langs(langs)
+        log.info("languages: %s", ", ".join(self.detector.langs))
+        self._reset()
+
+    def _load_langs(self, langs: list[str]) -> None:
+        try:
+            for lang in langs:
+                if lang not in self.detector.freq:
+                    self.detector._load(lang)
+            with self._lock:
+                self._set_langs()
+        except Exception:
+            log.exception("word lists")
+        finally:
+            self._loading = False
 
     def set_flip_hotkeys(self, hotkeys: list[tuple[int, int]]) -> None:
         with self._lock:
@@ -678,6 +711,7 @@ class AutoSwitcher(QObject):
             hwnd = user32.GetForegroundWindow() or 0
             if hwnd != self._hwnd:
                 self._hwnd = hwnd
+                self._set_langs(wait=False)  # a layout may have been added or removed meanwhile
                 self._reset("edge")
                 self._window = self._window_kind(hwnd)
                 self._kbd_thread = layout_thread(hwnd)
@@ -697,11 +731,15 @@ class AutoSwitcher(QObject):
             if vk == VK_BACK:
                 return self._backspace(hwnd)
             layout = self._fast_layout(hwnd)
+            if layout not in self.detector.langs:
+                layout = None  # Ukrainian while it is switched off: as any layout we do not follow
             if layout is None:
                 if vk in DELIMITERS and self._line:
-                    self.note("", "раскладка окна не русская и не английская")
+                    self.note("", "раскладка окна не из тех, за которыми слежу (русская, английская, украинская)")
                 self._reset()
                 return False
+            if layout in layouts.CYRILLIC:
+                layouts.cyrillic = layout  # where the fix-layout hotkey sends Latin text
             if vk in DELIMITERS:
                 return self._delimiter(vk, hwnd, layout)
             if vk not in US_KEYS:
@@ -853,26 +891,26 @@ class AutoSwitcher(QObject):
 
     def _command(self, word: list[Press], keys: str, layout: str) -> Fix | None:
         """The first word of a terminal line, typed in Russian, is a command: ды → ls, пше → git."""
-        if (not self._terminal or not self.terminal_answers or self._origin != "edge" or layout != "ru"
+        if (not self._terminal or not self.terminal_answers or self._origin != "edge" or layout == "en"
                 or self._word_start() != 0 or self.detector.is_exception(keys)):
             return None
         text = render(word, "en")
         if text.lower() not in COMMANDS:
             return None
-        return Fix(len(word), text, "en", render(word, "ru"), [keys])
+        return Fix(len(word), text, "en", render(word, layout), [keys])
 
     def _answer(self, vk: int, hwnd: int, layout: str) -> bool:
         """A terminal asks [y/N] and the answer went in the Russian layout: нуы → yes, н → y, тщ → no.
         A command alone on its line is fixed the same way: ды → ls, сды → cls."""
         run = self._line
         if (vk == VK_SPACE or not self.enabled or not self.terminal_answers or not self._terminal
-                or self._origin != "edge" or layout != "ru" or not run
-                or any(p.layout != "ru" or p.vk == VK_SPACE for p in run)):
+                or self._origin != "edge" or layout == "en" or not run
+                or any(p.layout != layout or p.vk == VK_SPACE for p in run)):
             return False
         typed = render(run, "en").lower()
         if not ((len(run) <= 3 and typed in ANSWERS) or typed in COMMANDS) or self.detector.is_exception(render(run, "en")):
             return False
-        job = ("answer", len(run), render(run, "ru"), render(run, "en"), hwnd, vk)
+        job = ("answer", len(run), render(run, layout), render(run, "en"), hwnd, vk)
         self._reset("edge")
         self._busy = True
         self._jobs.put(job)
@@ -895,7 +933,10 @@ class AutoSwitcher(QObject):
             if not letters or any(p.layout != letters[-1].layout for p in letters):
                 return False
             source = letters[-1].layout
-            target = other(source)
+            # The last word says where to: with three layouts, the one it reads as a word in.
+            last = self._line[self._run_start(1):]
+            target = self.detector.flip_target("".join(char_of(p, source) for p in last if p.vk != VK_SPACE), source,
+                                               self.session.prefer)
             # One word flipped by hand is a word to switch by itself next time.
             learn = "" if whole_line or len(letters) != len(run) else "".join(char_of(p, source) for p in letters)
             self._line[start:] = [replace(p, layout=target) for p in run]
@@ -1013,13 +1054,18 @@ class AutoSwitcher(QObject):
                 elif delimiter == VK_SPACE:
                     self._reset()
             return
-        type_fix(fix.erase, fix.text, delimiter)
+        moved = fix.text == fix.original  # Russian and Ukrainian type it alike: only the layout moves
+        if moved:
+            type_fix(0, "", delimiter)
+        else:
+            type_fix(fix.erase, fix.text, delimiter)
         self._switch(hwnd, fix.layout)
-        self.note(f"{fix.original} → {fix.text}", "исправлено", fixed=True)
+        self.note(f"{fix.original} → {fix.text}", f"раскладка: {layouts.LABELS[fix.layout]}" if moved else "исправлено",
+                  fixed=True)
         with self._lock:
             # After Enter or Tab the text may already be sent or left behind: no undo then.
             self._last = _Done(fix, layout, run) if delimiter == VK_SPACE else None
-        self.corrected.emit(fix.original, fix.text)
+        self.corrected.emit(fix.original, layouts.NOTE_LABELS[fix.layout] if moved else fix.text)
 
     def _apply_mid(self, fix: Fix, hwnd: int, layout: str, run: list[Press], origin: str) -> None:
         """A word fixed at its MID_LEN-th letter. That letter was held back: the field has one less."""
@@ -1198,7 +1244,7 @@ class AutoSwitcher(QObject):
                         self._reset()
                 elif vk in (VK_RETURN, VK_TAB):
                     self._reset("edge")
-                elif layout is None or self._window == "off":
+                elif layout not in self.detector.langs or self._window == "off":
                     self._reset()
                 elif vk == VK_SPACE:
                     self.session.reset()  # the word before it went unjudged

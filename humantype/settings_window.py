@@ -31,7 +31,7 @@ import win32gui
 from . import theme, wordlists
 from .autoswitch import AutoSwitcher, process_name
 from .config import DEFAULT_EXCLUDED, Hotkey, Settings
-from .layout import EN_TO_RU
+from .layout import EN_TO_RU, LANGS, text_of
 from .history import History
 from .hotkeys import MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN
 from .icons import app_icon, line_icon
@@ -403,8 +403,8 @@ def _learned_text(item: str) -> str:
     if len(parts) != 2:
         return item
     keys, lang = parts
-    word = keys.translate(EN_TO_RU) if lang == "ru" else keys
-    return f"{word}   ·   набирается как {keys if lang == 'ru' else keys.translate(EN_TO_RU)}"
+    word = text_of(keys, lang)
+    return f"{word}   ·   набирается как {keys if lang != 'en' else keys.translate(EN_TO_RU)}"
 
 
 class SettingsWindow(QDialog):
@@ -501,7 +501,7 @@ class SettingsWindow(QDialog):
                 row("Своя раскладка у каждой программы", "Запоминает, на каком языке вы пишете в программе, "
                     "и возвращает его, когда вы в неё переходите: в терминале — английский, в мессенджере — русский",
                     self.app_layouts),
-                row("Индикатор раскладки", "Маленькая метка RU / EN у текстового курсора, когда раскладка меняется. "
+                row("Индикатор раскладки", "Маленькая метка RU / EN / UA у текстового курсора, когда раскладка меняется. "
                     "В играх на весь экран не показывается", self.layout_indicator),
                 row("Запуск вместе с Windows", "HumanType будет в трее сразу после входа", self.autostart),
                 row(
@@ -597,6 +597,7 @@ class SettingsWindow(QDialog):
         self.skip_fullscreen = Toggle(settings.autoswitch_skip_fullscreen)
         self.autoswitch_notify = Toggle(settings.autoswitch_notify)
         self.terminal_answers = Toggle(settings.autoswitch_terminal_answers)
+        self.ukrainian = Toggle(settings.autoswitch_ukrainian)
 
         picker = QComboBox()
         picker.setEditable(True)
@@ -643,6 +644,12 @@ class SettingsWindow(QDialog):
                 "Ответы в терминале",
                 "н, нуы, т, тщ по Enter становятся y, yes, n, no; команды в начале строки — тоже: ды → ls, пше → git",
                 self.terminal_answers,
+            ),
+            row(
+                "Украинский язык",
+                "Третья раскладка: ghbdsn → привіт, а «привыт» и «місли» исправляются между русской и украинской. "
+                "Работает, только если украинская раскладка установлена в Windows",
+                self.ukrainian,
             ),
             self.excluded,
             self.learned_words,
@@ -700,7 +707,7 @@ class SettingsWindow(QDialog):
         learned = {}
         for item in self.learned_words.items():
             parts = item.split()
-            if len(parts) == 2 and parts[1] in ("ru", "en"):
+            if len(parts) == 2 and parts[1] in LANGS:
                 learned[parts[0].lower()] = parts[1]
         return learned
 
@@ -859,6 +866,7 @@ class SettingsWindow(QDialog):
             autoswitch_skip_fullscreen=self.skip_fullscreen.isChecked(),
             autoswitch_notify=self.autoswitch_notify.isChecked(),
             autoswitch_terminal_answers=self.terminal_answers.isChecked(),
+            autoswitch_ukrainian=self.ukrainian.isChecked(),
             autoswitch_excluded=self.excluded.items(),
         )
 
@@ -879,6 +887,7 @@ class SettingsWindow(QDialog):
         self.skip_fullscreen.setChecked(defaults.autoswitch_skip_fullscreen)
         self.autoswitch_notify.setChecked(defaults.autoswitch_notify)
         self.terminal_answers.setChecked(defaults.autoswitch_terminal_answers)
+        self.ukrainian.setChecked(defaults.autoswitch_ukrainian)
         self.excluded.set_items(list(DEFAULT_EXCLUDED))
         self.limit.setValue(defaults.history_limit)
         self.save_images.setChecked(defaults.save_images)

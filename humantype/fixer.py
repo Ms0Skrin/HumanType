@@ -9,9 +9,9 @@ from PySide6.QtCore import QObject, QTimer
 
 from . import winapi
 from .history import History
-from .layout import LANG_EN, LANG_RU, convert
+from .layout import LANG_IDS, NOTE_LABELS, convert
 
-LANG_NAMES = {LANG_RU: "РУ", LANG_EN: "EN"}
+LANG_NAMES = {LANG_IDS[lang]: label for lang, label in NOTE_LABELS.items()}
 # What a fix does to the text: the new text and the layout it now belongs to (None: leave the layout).
 Transform = Callable[[str], tuple[str, int | None]]
 

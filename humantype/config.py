@@ -91,6 +91,7 @@ class Settings:
     autoswitch_skip_fullscreen: bool = True
     autoswitch_notify: bool = True
     autoswitch_terminal_answers: bool = True  # н, нуы, т, тщ in a terminal → y, yes, n, no on Enter
+    autoswitch_ukrainian: bool = True  # Ukrainian too, when its layout is installed
     autoswitch_excluded: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDED))
     version: int = SETTINGS_VERSION
 

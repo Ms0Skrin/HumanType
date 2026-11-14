@@ -27,7 +27,7 @@ from .detector import Detector
 from .fixer import LayoutFixer
 from .history import History
 from .hotkeys import Hotkeys
-from .layout import RU_TO_EN
+from .layout import NOTE_LABELS, UK_ONLY, keys_of
 from .icons import app_icon, line_icon, tray_icon
 from .indicator import Indicator
 from .journal_window import JournalWindow
@@ -190,6 +190,7 @@ class HumanTypeApp:
             settings.autoswitch_excluded,
             settings.autoswitch_terminal_answers,
             settings.autoswitch_mid_word,
+            settings.autoswitch_ukrainian,
         )
         self.app_layouts.remember = settings.app_layouts
         self.app_layouts.set_active(settings.app_layouts or settings.layout_indicator)
@@ -342,13 +343,16 @@ class HumanTypeApp:
     def _on_flipped(self, text: str, lang: str) -> None:
         self._quiet()
         self.stats.add("manual")
-        self.notify(f"✓ {'РУ' if lang == 'ru' else 'EN'}: {text.strip()[:40]}")
+        self.notify(f"✓ {NOTE_LABELS.get(lang, 'EN')}: {text.strip()[:40]}")
 
     def _on_undone(self, word: str, for_good: bool) -> None:
         self._quiet()
         # Counted by the keys that type the word, as the exceptions are kept; a word undone in its
         # middle ("ghbdt…") is only a beginning and is not counted as a word.
-        keys = word.translate(RU_TO_EN) if any("а" <= c.lower() <= "я" or c in "ёЁ" for c in word) else word
+        if any(c in UK_ONLY for c in word):
+            keys = keys_of(word, "uk")
+        else:
+            keys = keys_of(word, "ru") if any("а" <= c.lower() <= "я" or c in "ёЁ" for c in word) else word
         self.stats.add("undone", "" if word.endswith("…") or " " in word else keys.lower())
         if for_good:
             self.toast.show_text(f"Оставил «{word}» как есть и запомнил", 1600)
