@@ -39,5 +39,5 @@ def fetch(lang: str, rounds: int) -> None:
 
 if __name__ == "__main__":
     RAW.mkdir(exist_ok=True)
-    for lang in ("ru", "en"):
+    for lang in ("ru", "en", "uk"):
         fetch(lang, int(sys.argv[1]) if len(sys.argv) > 1 else 25)

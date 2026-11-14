@@ -21,7 +21,7 @@ _RU_VOWELS = set("аеёиоуыэюя")
 
 
 def _is_cyrillic(c: str) -> bool:
-    return "а" <= c.lower() <= "я" or c in "ёЁ"
+    return "а" <= c.lower() <= "я" or c in "ёЁіїєґІЇЄҐ"
 
 
 def _cased(new: str, source: str, shout: bool) -> str:

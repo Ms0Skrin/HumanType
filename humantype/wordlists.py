@@ -6,7 +6,7 @@ file means the same on any system."""
 
 import json
 
-LANGS = ("ru", "en")
+from .layout import LANGS
 
 
 def dump(exceptions: set[str], learned: dict[str, str]) -> str:
@@ -18,7 +18,7 @@ def dump(exceptions: set[str], learned: dict[str, str]) -> str:
 
 def parse(text: str) -> tuple[set[str], dict[str, str]]:
     """The exceptions and the learned words of a file made by `dump`. A plain list is read too:
-    a word on a line is an exception, a word and `ru` or `en` after it is a learned one
+    a word on a line is an exception, a word and `ru`, `en` or `uk` after it is a learned one
     (the form of exceptions.txt and autoswitch_learned.txt). ValueError when it is neither."""
     text = text.lstrip("﻿").strip()
     exceptions: set[str] = set()
